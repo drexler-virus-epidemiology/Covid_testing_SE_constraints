@@ -1,0 +1,1889 @@
+---
+title: "PD Frequentist Regression Analysis"
+author: "Carl Beuchel"
+date: today
+theme: spacelab #sandstone #flatfly #spacelab
+highlight: pygments
+format:
+  html:
+    df-print: kable
+    fig-width: 8
+    fig-height: 6
+    code-fold: true
+    code-summary: "Show the code"
+    standalone: true
+    embed-resources: true
+output:
+  html_document:
+    code_download: true
+toc: true  
+toc-depth: 3
+number-sections: true
+toc-float:
+  smooth-scroll: true
+execute:
+  include: true
+  eval: true
+  echo: true
+  warning: false
+editor: source
+editor_options: 
+  chunk_output_type: console
+project:
+  type: default
+  preview:
+    port: 4200
+    browser: false
+---
+
+
+```{r}
+#| echo: true
+#| include: false
+
+# define alternative package directory
+r_on_cluster <- FALSE
+if (r_on_cluster == TRUE) {
+  bp <- "/data/gpfs-1/users/cabe12_c"
+  .libPaths("/fast/work/groups/ag-drexler/RPackageLibrary/4.1.3/")
+} else {
+  if (grepl(x = getwd(), pattern =  "carl")) {
+    bp <- "/home/carl/Dokumente/06_projects/"
+  }
+}
+
+#+ load.packages, include=F
+for (i in c(
+  "data.table",
+  "here",
+  "Hmisc",
+  "ggplot2",
+  "ggrepel",
+  "ggthemes",
+  "MASS",
+  "jtools",
+  "broom",
+  "ciTools",
+  "knitr",
+  "toolboxH",
+  "rstanarm", 
+  "knitr",
+  "plotly", 
+  "dplyr", 
+  "scales"
+)
+) {
+  suppressPackageStartupMessages(
+    library(i, character.only = TRUE
+    ))
+}
+
+checkForUpdates <- FALSE
+if (checkForUpdates) {
+  
+  # set a more recent R snapshot as source repo
+  r = getOption("repos")
+  r["CRAN"] = "http://cran.cnr.berkeley.edu/"
+  options(repos = r)
+  rm(r)
+  
+  # Check unsuccessful updates packages
+  old.packages()
+  
+  # Update packages to that snapshot
+  update.packages(
+    ask = FALSE,
+    checkBuilt = TRUE, 
+    lib.loc = .libPaths()[1]
+  )
+}
+
+# When within the Charite network or VPN, proxy settings need to be adapted
+chariteVPN <- TRUE
+if (chariteVPN) {
+  Sys.setenv(https_proxy = "proxy.charite.de:8080")
+  Sys.setenv(http_proxy = "proxy.charite.de:8080")
+}
+
+# ggplot theme
+ggplot2::theme_set(
+  theme_tufte(base_size = 14) +
+    theme(panel.background = element_rect(colour = "grey35"),
+          plot.background = element_rect(fill = "white", 
+                                         colour = NA))
+)
+
+# Knitr should use the project root and not the script location as root
+knitr::opts_knit$set(root.dir = here(), 
+                     base.dir = here("scripts"))
+
+# Give data.table enough threads
+writeLines(paste0("Threads available: ", parallel::detectCores()))
+writeLines(paste0("Threads given to data.table: ", parallel::detectCores() / 2))
+setDTthreads(parallel::detectCores() / 2)
+
+# Option setup for
+options(prType = 'html')
+options(knitr.table.format = "html")
+# options(grType = 'plotly')
+```
+
+Main analysis:
+
+* Global LR: TC ~ Variables + Regional-Effect
+* Stratified per-region LR: TC ~ Variables
+* Correlation TC ~ all variables
+* GNI is not highly correlated to HDI --> use it as predictor
+* FLB is not highly correlated to GI --> use it as predictor
+* HDI ~ GI rho=-0.91
+* AAG ~ GI rho=-0.81
+* GDP ~ GI rho=-0.79
+
+Select indices that do not correlate highly, focus on GI
+
+* Choose GI over HDI --> GI is specific policy, HDI a meta aggregate ("develop your country" vs. "treat women better" as argument)
+* Region strong confounder, **cannot** be ignored
+* High correlation of GI with HDI, GDP, might be an influence
+
+## Load Data
+
+```{r}
+# Covid Testing/Vaccination data
+data <- fread("data/clean-data/owid-data.tsv")
+
+# MMR Vaccination data
+mmr1 <- fread("data/owid/230606-MCV1-coverage-one-year-olds.csv")
+mmr2 <- fread("data/owid/230606-MCV2-coverage-recommended-age.csv")
+```
+
+## Global TC Regression Testing (2020/2021)
+
+* Use scaled predictors to make effects comparable
+
+```{r}
+# scaled data
+data_scaled <- copy(data)
+data_scaled <- data_scaled[, .(
+  Testing20, 
+  Testing21, 
+  GBDR7,
+  CHE = c(scale(CHE)), 
+  UP = c(scale(UP)), 
+  log_PD = c(scale(log_PD)), 
+  EP = c(scale(EP)), 
+  GI = c(scale(GI)),
+  Gini = c(scale(Gini)),
+  VE = c(scale(VE))
+)]
+
+# Don't use the scaled GI, not necessary
+non_correlated_indices <- c("CHE", "UP", "log_PD", "EP", "GI", "Gini", "VE")
+
+# Create a factor for GBDR7 to set reference factor in model to high-income
+data_scaled$GBDR7_f <- relevel(factor(data_scaled$GBDR7), 2)
+```
+
+Fit the model
+
+```{r}
+# Main Model Formula
+model_formula_20 <- paste0("Testing20 ~ 1 + GBDR7_f + ", paste(non_correlated_indices, collapse = " + "))
+model_formula_21 <- paste0("Testing21 ~ 1 + GBDR7_f + ", paste(non_correlated_indices, collapse = " + "))
+
+# Model fit (including dispersion parameter theta estimation)
+mod_negbin_20 <- glm.nb(formula = model_formula_20, data = data_scaled)
+mod_negbin_21 <- glm.nb(formula = model_formula_21, data = data_scaled)
+
+# Summary of each model to 
+mod_negbin_21  |> tidy(conf.int = TRUE, exponentiate = TRUE) |> kable()
+mod_negbin_20  |> tidy(conf.int = TRUE, exponentiate = TRUE) |> kable()
+
+# Model info
+broom::glance(mod_negbin_20) |> kable()
+broom::glance(mod_negbin_21) |> kable()
+
+# Print dispersion parameter
+mod_negbin_20$theta
+mod_negbin_21$theta
+
+# Save the coefficients
+mod_negbin_20_coefs <- cbind(
+  mod_negbin_20 |> tidy() |> as.data.table(),
+  confint(mod_negbin_20)
+)
+mod_negbin_21_coefs <- cbind(
+  mod_negbin_21 |> tidy() |> as.data.table(),
+  confint(mod_negbin_21)
+)
+
+# join data for plotting
+mod_negbin_20_coefs[, year := "2020"]
+mod_negbin_21_coefs[, year := "2021"]
+mod_negbin_coefs <- rbindlist(list(mod_negbin_20_coefs,
+                                   mod_negbin_21_coefs))
+
+# Transform estimates and CI to Incidence Rate Ratio (% increase/decrease from base)
+mod_negbin_coefs[, `:=`(exp_estimate = exp(estimate), 
+                        exp_2_5 = exp(`2.5 %`), 
+                        exp_97_5 = exp(`97.5 %`))]
+
+# Calculate the relative change in testing by each predictor increase
+mod_negbin_coefs[, `:=`(rel_change  = exp_estimate - 1, 
+                        rel_change_2_5 = exp_2_5 - 1, 
+                        rel_change_97_5 = exp_97_5 - 1)]
+
+# Create ordered factor to improve plotting
+mod_negbin_coefs[, term := factor(
+  term, 
+  ordered = T, 
+  levels = c(
+    "(Intercept)", 
+    "GBDR7_fCentral Europe, Eastern Europe, and Central Asia", 
+    "GBDR7_fLatin America and Caribbean", 
+    "GBDR7_fNorth Africa and Middle East", 
+    "GBDR7_fSoutheast Asia, East Asia, and Oceania", 
+    "GBDR7_fSub-Saharan Africa", 
+    "CHE", 
+    "GI", 
+    "Gini",
+    "VE",
+    "EP", 
+    "log_PD", 
+    "UP"
+  ) |> rev(), 
+  labels = c(
+    "(Intercept)", 
+    "GBDR7\n(Central/Eastern Europe, and Central Asia)", 
+    "GBDR7\n(Latin America and Caribbean)", 
+    "GBDR7\n(North Africa and Middle East)", 
+    "GBDR7\n(Southeast Asia, East Asia, and Oceania)", 
+    "GBDR7\n(Sub-Saharan Africa)", 
+    "CHE", 
+    "GI", 
+    "Gini",
+    "VE",
+    "EP", 
+    "log(PD)", 
+    "UP"
+  ) |> rev()
+)]
+
+# create dummy factor for facetting
+mod_negbin_coefs[, facet_dum := ifelse(grepl("GBDR7|Intercept", term), "A", "B")]
+```
+
+Print the results with convenient rounding.
+
+```{r}
+mod_negbin_coefs[, lapply(.SD, function(x){
+  if(is.numeric(x))
+    return(format(signif(x,2),scientific=F))
+  else
+    return(x)
+}
+)] |> kable()
+
+
+
+```
+Save as result.
+
+```{r}
+fwrite(
+  x = mod_negbin_coefs[, .(
+    Year = year,
+    Predictor = term, 
+    effect_estimate = estimate,
+    standard_error = std.error,
+    test_statistic = statistic,
+    p_value = p.value,
+    confidence_interval_lower = `2.5 %`,
+    confidence_interval_upper = `97.5 %`,
+    relative_change = format(rel_change * 100, scientific = F),
+    relative_change_lower_ci = format(rel_change_2_5 * 100, scientific = F),
+    relative_change_upper_ci = format(rel_change_97_5 * 100, scientific = F)
+  )], 
+  file = "paper/tables/tc_global_regression_sumstats.csv",
+  sep = ","
+)
+
+```
+
+Create variables to analyze the data as relative change in years.
+```{r}
+# create variables to analyze the data as relative change in years.
+# Split the data 
+data_2020 <- mod_negbin_coefs %>% 
+  filter(year == "2020") %>% 
+  select(-year) %>% 
+  rename(rel_change_2020 = rel_change)
+
+data_2021 <- mod_negbin_coefs %>% 
+  filter(year == "2021") %>% 
+  select(-year) %>% 
+  rename(rel_change_2021 = rel_change)
+
+# Merge
+merged_data <- inner_join(data_2020, data_2021, by = "term")
+
+# Calculating the relative change
+mod_negbin_coefs_change <- merged_data %>% 
+  mutate(relchange2020_2021 = (rel_change_2021 - rel_change_2020) * 100)
+
+#format
+
+mod_negbin_coefs_change <- mod_negbin_coefs_change[, lapply(.SD, function(x){
+  if(is.numeric(x))
+    return(format(signif(x,2),scientific=F))
+  else
+    return(x)
+})]
+
+```
+Save as result.
+
+```{r}
+fwrite(
+  x = mod_negbin_coefs_change[, .(
+    Predictor = term, 
+    Relative_change_2020_2021 = format (relchange2020_2021, scientific=F)
+  )], 
+  file = "paper/tables/tc_global_regression_sumstats_change.csv",
+  sep = ","
+)
+
+```
+
+### Forestplot
+
+Plot the results. Reference group for the Region effects is "High-Income".
+Displayed effects are independent of region and other indices and represent a
+global trend.
+
+```{r}
+#| fig-width: 8
+#| fig-height: 4
+
+# Custom breaks for the x axis to make effect size clear
+b <- seq(-150, 150, 25)
+
+# Custom forest plot
+p <- ggplot(mod_negbin_coefs[term != "(Intercept)"],
+            aes(color = year,
+                y = term)
+) +
+  facet_wrap(~facet_dum, scales = "free_y") +
+  geom_point(aes(x = rel_change * 100, 
+                 group = year),
+             position = position_dodge2(width = 0.8, reverse = TRUE),
+             shape = 15, 
+             size = 3
+  ) +
+  geom_linerange(aes(xmin = rel_change_2_5 * 100, 
+                     xmax = rel_change_97_5 * 100,
+                     group = year),
+                 position = position_dodge2(width = 0.8, reverse = TRUE)
+  ) + 
+  geom_vline(xintercept = 0, 
+             linetype = "dashed") +
+  guides(color = guide_legend(title = "Year")) +
+  labs(x = "Relative Change in Testing Capacity [%]", y = "") + 
+  scale_x_continuous(breaks = b) +
+  theme(legend.position = "bottom", 
+        strip.text = element_blank(), 
+        plot.background = element_rect(fill = "white"),
+        axis.text.x = element_text(size = 10))
+
+
+p_simplified <- ggplot(mod_negbin_coefs[mod_negbin_coefs$term != "(Intercept)"], 
+                       aes(y = term, color = year)) +
+  geom_point(aes(x = rel_change * 100), 
+             position = position_dodge2(width = 0.8, reverse = TRUE),
+             shape = 15, 
+             size = 3) +
+  geom_linerange(aes(xmin = rel_change_2_5 * 100, 
+                     xmax = rel_change_97_5 * 100),
+                 position = position_dodge2(width = 0.8, reverse = TRUE)) +
+  geom_vline(xintercept = 0, linetype = "dashed")
+
+ggplotly(p_simplified)
+
+```
+
+
+```{r}
+print(p)
+ggsave(p, 
+       filename = "tc_global_forestplot.pdf",
+       path = "paper/figures/",
+       device = "pdf", 
+       width = 9, 
+       height = 4, 
+       dpi = 150)
+
+```
+
+### Predict changes in TC 
+
+This section uses the models for each year to predict changes in TC in each region under a specific scenario: Within a region, given that 
+
+```{r}
+#| include: false
+#| echo: false
+#| eval: true
+
+# Super hacky fix to model matrix error.
+my_get_sim_response_nb <- function(df, fit, nSims, additional_i) 
+{
+  nPreds <- NROW(df)
+  
+  # Try to get around the model matrix contrast error by setting predictors zero here! 
+  setDT(df)
+  set(df, j = c(additional_i, 'Testing20'), value = runif(180, 10, 20))
+  setDF(df)
+  
+  modmat <- model.matrix(fit, data = df)
+  modmat[, colnames(modmat) %in% additional_i] <- 0
+  ####
+  
+  setDT(df)
+  set(df, j = c(additional_i, 'Testing20'), value = 0)
+  setDF(df)
+  
+  response_distr <- fit$family$family
+  inverselink <- fit$family$linkinv
+  sims <- ciTools:::get_negbin_sims(fit, nSims)
+  sim_response <- matrix(0, ncol = nSims, nrow = nPreds)
+  for (i in 1:nSims) {
+    yhat <- inverselink(modmat %*% sims@coef[i, ])
+    sim_response[, i] <- rnegbin(n = nPreds, mu = yhat, 
+                                 theta = fit$theta)
+  }
+  sim_response
+}
+
+my_add_pi <- function (df, fit, alpha = 0.05, names, yhatName, nSims = 2000, additional_i) 
+{
+  out <- predict(fit, newdata = df, type = "response")
+  disp <- fit$dispersion
+  sim_response <- my_get_sim_response_nb(df, fit, nSims, additional_i = additional_i)
+  lwr <- apply(sim_response, 1, FUN = quantile, probs = alpha/2, 
+               type = 1)
+  upr <- apply(sim_response, 1, FUN = quantile, probs = 1 - 
+                 alpha/2, type = 1)
+  if (is.null(df[[yhatName]])) 
+    df[[yhatName]] <- out
+  df[[names[1]]] <- lwr
+  df[[names[2]]] <- upr
+  data.frame(df)
+}
+```
+
+Plot fit predictions for GI using add_ci.negbin for 2020 Predictions
+
+```{r}
+# Use the fits to predict values for each year
+model_list <- list(
+  "2020" = mod_negbin_20,
+  "2021" = mod_negbin_21
+)
+
+# Avoid nested list and create single grid for looping
+test_plan <- expand.grid(
+  year = c("2020", "2021"),
+  indices = non_correlated_indices, 
+  stringsAsFactors = FALSE
+)
+setDT(test_plan)
+test_plan <- test_plan[order(year, indices)]
+test_plan[, run_index := .I]
+
+# Save all CI and PI predictions for each index in a list
+res_ci_pi <- vector("list", length(non_correlated_indices))
+names(res_ci_pi) <- non_correlated_indices
+
+# Save results for later plotting
+result_list <- list(
+  "2020" = res_ci_pi,
+  "2021" = res_ci_pi
+)
+```
+
+Loop through each index and year to create predictions
+
+```{r}
+for (test_plan_i in test_plan$run_index) {
+  
+  # test_plan_i <- 1
+  i <- test_plan[run_index == (test_plan_i), indices]
+  my_year <- test_plan[run_index == (test_plan_i), year]
+  
+  new_dat <- data.table(
+    GBDR7_f = rep(levels(data_scaled$GBDR7_f),each = 30),
+    Testing20 = as.numeric(0),
+    Testing21 = as.numeric(0)
+  )
+  set(new_dat, j = i, value = rep(seq(-3,3, length.out = 30), 
+                                  times = uniqueN(data_scaled$GBDR7)))
+  set(new_dat, j = non_correlated_indices[non_correlated_indices != i], value = 0)
+  
+  # Add CI for constant predictors except GI
+  new_dat_ci <- add_ci(new_dat,
+                       fit = model_list[[my_year]], 
+                       yhatName = "ci_pred",
+                       names = c("lcb", "ucb")
+  )
+  
+  # Temporarily set Predictors to non-zero to make the function work (I'm sorry it sucks)
+  new_dat_ci <- cbind(
+    new_dat_ci,
+    my_add_pi(df = new_dat,
+              fit = model_list[[my_year]],
+              yhatName = "pi_pred", 
+              additional_i = non_correlated_indices[non_correlated_indices != i],
+              names = c("lpb", "upb")
+    )[, c("pi_pred", "lpb", "upb")])
+  
+  setDT(new_dat_ci)
+  new_dat_ci[, pred_index := (i)]
+  
+  # Remove Mock variables
+  new_dat_ci$Testing20 <- NULL
+  new_dat_ci$Testing21 <- NULL
+  
+  # Save predictions for year and index
+  result_list[[my_year]][[i]] <- new_dat_ci
+  
+}
+```
+
+Consolidate Results
+
+```{r}
+# For 2020
+res_ci_pi_2020 <- rbindlist(result_list[["2020"]], use.names = TRUE)
+res_ci_pi_2020[, index_range := rep(
+  seq(-3,3, length.out = 30), 
+  times = uniqueN(data_scaled$GBDR7) * uniqueN(non_correlated_indices)
+)
+]
+res_ci_pi_2020[, Year := ("2020")]
+
+# For 2021
+res_ci_pi_2021 <- rbindlist(result_list[["2021"]], use.names = TRUE)
+res_ci_pi_2021[, index_range := rep(
+  seq(-3,3, length.out = 30), 
+  times = uniqueN(data_scaled$GBDR7) * uniqueN(non_correlated_indices)
+)
+]
+res_ci_pi_2021[, Year := ("2021")]
+
+# Join
+res_ci_pi <- rbindlist(list(res_ci_pi_2020, res_ci_pi_2021))
+```
+
+Save prediction results
+
+```{r}
+fwrite(
+  x = res_ci_pi[, .(
+    Year,
+    GBDR7 = GBDR7_f,
+    Predictor = pred_index,
+    Predictor_value = index_range,
+    predicted_value = ci_pred,
+    confidence_interval_lower = lcb,
+    confidence_interval_upper = ucb,
+    prediction_interval_lower = lpb,
+    prediction_interval_upper = upb
+  )], 
+  file = "paper/tables/tc_global_prediction_results.csv",
+  sep = ","
+)
+```
+
+Plot predictions for 2020
+
+```{r}
+#| fig-width: 8
+#| fig-height: 8
+
+p1 <- ggplot(res_ci_pi[Year == "2020"], 
+             aes(x = index_range, y = ci_pred)) + 
+  facet_grid(
+    pred_index~GBDR7_f, 
+    labeller = labeller(
+      .rows =  c(CHE = "CHE", UP = "UP", 
+                 log_PD = "log(PD)", EP = "EP",
+                 GI = "GI", Gini = "Gini", VE = "VE"), 
+      .cols = c(
+        "High-Income" = "High-Income", 
+        "Central Europe, Eastern Europe, and Central Asia" = "Central Europe,\nEastern Europe,\nCentral Asia", 
+        "Latin America and Caribbean" = "Latin America\nand\nCaribbean", 
+        "North Africa and Middle East" = "North Africa\nand\nMiddle East", 
+        "Southeast Asia, East Asia, and Oceania" = "Southeast Asia,\nEast Asia\nand Oceania", 
+        "Sub-Saharan Africa" = "Sub-Saharan\nAfrica"
+      )
+    )
+  ) +
+  scale_x_continuous(breaks = -2:2) +
+  scale_y_continuous(
+    trans = "log10",
+    labels = trans_format("log10",
+                          math_format(10^.x))) +
+  annotation_logticks(sides = "l", 
+                      outside = T, 
+                      long = grid::unit(1.5, "mm"),
+                      mid = grid::unit(1.1, "mm"),
+                      short = grid::unit(.8, "mm")
+  ) +
+  geom_line(aes(y = ci_pred), lwd = 1, color = "maroon") +
+  geom_ribbon(aes(ymin = lcb, ymax = ucb), fill = "royalblue1", alpha = 0.3) +
+  geom_ribbon(aes(ymin = lpb, ymax = upb), fill = "indianred4", alpha = 0.3) +
+  # scale_y_continuous(labels = function(x) format(x, scientific = FALSE)) +
+  xlab("Predictor value (in Mean +- Standard Deviations)") +
+  ylab("Testing Capacity 2020")
+
+p2 <- ggplot(res_ci_pi[Year == "2020"], 
+             aes(x = index_range, y = ci_pred)) + 
+  facet_grid(
+    pred_index~GBDR7_f, 
+    labeller = labeller(
+      .rows =  c(CHE = "CHE", UP = "UP", 
+                 log_PD = "log(PD)", EP = "EP",
+                 GI = "GI", Gini = "Gini", VE = "VE"), 
+      .cols = c(
+        "High-Income" = "High-Income", 
+        "Central Europe, Eastern Europe, and Central Asia" = "Central Europe,\nEastern Europe,\nCentral Asia", 
+        "Latin America and Caribbean" = "Latin America\nand\nCaribbean", 
+        "North Africa and Middle East" = "North Africa\nand\nMiddle East", 
+        "Southeast Asia, East Asia, and Oceania" = "Southeast Asia,\nEast Asia\nand Oceania", 
+        "Sub-Saharan Africa" = "Sub-Saharan\nAfrica"
+      )
+    )
+  ) +
+  scale_x_continuous(breaks = -2:2) +
+  scale_y_continuous(labels = scales::label_number()) + 
+  geom_line(aes(y = ci_pred), lwd = 1, color = "maroon") +
+  geom_ribbon(aes(ymin = lcb, ymax = ucb), fill = "royalblue1", alpha = 0.3) +
+  geom_ribbon(aes(ymin = lpb, ymax = upb), fill = "indianred4", alpha = 0.3) +
+  # scale_y_continuous(labels = function(x) format(x, scientific = FALSE)) +
+  xlab("Predictor value (in Mean +- Standard Deviations)") +
+  ylab("Testing Capacity 2020")
+
+print(p1)
+print(p2)
+```
+
+Save 2020 plots
+
+```{r}
+
+ggsave(p1, 
+       filename = "2020_tc_global_prediction_log.tiff",
+       path = "paper/figures/",
+       device = "tiff", 
+       width = 9, 
+       height = 9, 
+       dpi = 150)
+
+ggsave(p2, 
+       filename = "2020_tc_global_prediction_linear.tiff",
+       path = "paper/figures/",
+       device = "tiff", 
+       width = 9, 
+       height = 9, 
+       dpi = 150)
+```
+
+Plot predictions for 2021
+
+```{r}
+p3 <- ggplot(res_ci_pi[Year == "2021"], aes(x = index_range, y = ci_pred))  + 
+  facet_grid(
+    pred_index~GBDR7_f, 
+    labeller = labeller(
+      .rows =  c(CHE = "CHE", UP = "UP", 
+                 log_PD = "log(PD)", EP = "EP",
+                 GI = "GI", Gini = "Gini", VE = "VE"), 
+      .cols = c(
+        "High-Income" = "High-Income", 
+        "Central Europe, Eastern Europe, and Central Asia" = "Central Europe,\nEastern Europe,\nCentral Asia", 
+        "Latin America and Caribbean" = "Latin America\nand\nCaribbean", 
+        "North Africa and Middle East" = "North Africa\nand\nMiddle East", 
+        "Southeast Asia, East Asia, and Oceania" = "Southeast Asia,\nEast Asia\nand Oceania", 
+        "Sub-Saharan Africa" = "Sub-Saharan\nAfrica"
+      )
+    )
+  ) +
+  scale_y_continuous(
+    trans = "log10",
+    labels = trans_format("log10",
+                          math_format(10^.x))) +
+  annotation_logticks(sides = "l", 
+                      outside = T, 
+                      long = grid::unit(1.5, "mm"),
+                      mid = grid::unit(1.1, "mm"),
+                      short = grid::unit(.8, "mm")
+  ) +
+  scale_x_continuous(breaks = -2:2) +
+  geom_line(aes(y = ci_pred), lwd = 1, color = "maroon") +
+  geom_ribbon(aes(ymin = lcb, ymax = ucb), fill = "royalblue1", alpha = 0.3) +
+  geom_ribbon(aes(ymin = lpb, ymax = upb), fill = "indianred4", alpha = 0.3) +
+  # scale_y_continuous(labels = function(x) format(x, scientific = FALSE)) +
+  xlab("Predictor value (in Mean +- Standard Deviations)") +
+  ylab("Testing Capacity 2021")
+
+p4 <- ggplot(res_ci_pi[Year == "2021"], aes(x = index_range, y = ci_pred))  + 
+  facet_grid(
+    pred_index~GBDR7_f, 
+    labeller = labeller(
+      .rows =  c(CHE = "CHE", UP = "UP", 
+                 log_PD = "log(PD)", EP = "EP",
+                 GI = "GI", Gini = "Gini", VE = "VE"), 
+      .cols = c(
+        "High-Income" = "High-Income", 
+        "Central Europe, Eastern Europe, and Central Asia" = "Central Europe,\nEastern Europe,\nCentral Asia", 
+        "Latin America and Caribbean" = "Latin America\nand\nCaribbean", 
+        "North Africa and Middle East" = "North Africa\nand\nMiddle East", 
+        "Southeast Asia, East Asia, and Oceania" = "Southeast Asia,\nEast Asia\nand Oceania", 
+        "Sub-Saharan Africa" = "Sub-Saharan\nAfrica"
+      )
+    )
+  ) +
+  scale_y_continuous(labels =  scales::label_number()) + 
+  scale_x_continuous(breaks = -2:2) +
+  geom_line(aes(y = ci_pred), lwd = 1, color = "maroon") +
+  geom_ribbon(aes(ymin = lcb, ymax = ucb), fill = "royalblue1", alpha = 0.3) +
+  geom_ribbon(aes(ymin = lpb, ymax = upb), fill = "indianred4", alpha = 0.3) +
+  # scale_y_continuous(labels = function(x) format(x, scientific = FALSE)) +
+  xlab("Predictor value (in Mean +- Standard Deviations)") +
+  ylab("Testing Capacity 2021")
+```
+
+Plot 2021 predictions.
+
+```{r}
+
+ggsave(p3, 
+       filename = "2021_tc_global_prediction_log.tiff",
+       path = "paper/figures/",
+       device = "tiff", 
+       width = 9, 
+       height = 9, 
+       dpi = 150)
+
+ggsave(p4, 
+       filename = "2021_tc_global_prediction_linear.tiff",
+       path = "paper/figures/",
+       device = "tiff", 
+       width = 9, 
+       height = 9, 
+       dpi = 150)
+```
+
+
+## Regional TC Regression Testing (2020/2021)
+
+Create the data object. Needs some transformation for 
+
+```{r}
+data_model <- melt(
+  data, 
+  id.vars =  c("location", "GBDR7"), 
+  measure.vars = c("Testing20", "Testing21"), 
+  variable.name = "Year", 
+  value.name = "Tests"
+)
+data_model[, Year := ifelse(Year == "Testing20", "2020", "2021")]
+
+# Add the indices
+m1 <- match(data_model$location, data$location)
+data_model[, c(non_correlated_indices, "Population") := 
+             data[(m1), .SD, .SDcols = c(non_correlated_indices, "Population")]]
+
+# Plot data with their mean
+data_model_long <- copy(data_model)
+
+# also refactor GBDR7 to have identical order in plots
+data_model_long$GBDR7 <- factor(data_model_long$GBDR7) |> relevel(ref = 2)
+
+# Melt again to plot all indices at the same time
+data_model_long <- melt(data_model_long, 
+                        measure.vars = non_correlated_indices,
+                        variable.name = "Index",
+                        id.vars = c("location", "GBDR7", "Year", "Population", "Tests"),
+                        value.name = "Value", 
+                        variable.factor = FALSE)
+```
+
+
+**Scale data within region for the region-specific regression. That means each predictor indicates relative change within region!**
+
+I don't yet know whether this is really useful, will check.
+
+```{r}
+data_model[ ,`:=`(
+  CHE = c(scale(CHE)), 
+  UP = c(scale(UP)), 
+  log_PD = c(scale(log_PD)), 
+  EP = c(scale(EP)), 
+  GI = c(scale(GI)), 
+  Gini = c(scale(Gini)), 
+  VE = c(scale(VE)),
+  Tests = as.integer(Tests)
+), by = GBDR7]
+```
+
+Create analysis plan and result object for regression in each region & year.
+
+```{r}
+# Create a object listing all models to fit
+regional_tests <- data_model_long[, expand.grid(
+  Year = unique(Year), 
+  Region = unique(GBDR7),
+  Predictors = paste(non_correlated_indices, collapse = " + "),
+  stringsAsFactors = FALSE)
+] |> as.data.table()
+regional_tests[, index := 1:.N]
+model_list <- vector("list", nrow(regional_tests))
+names(model_list) <- paste(regional_tests$Region, regional_tests$Year, sep = ": ")
+
+# Save results for each predictor in year and region
+results_regional <- data_model_long[, expand.grid(
+  Year = unique(Year), 
+  Region = unique(GBDR7),
+  Predictors = c("Intercept", non_correlated_indices),
+  stringsAsFactors = FALSE)
+] |> as.data.table()
+
+# create columns for all parameter estimates 
+results_regional[, c("estimate", "std_error",
+                     "test_statistic", "p_value", 
+                     "ci95_lower", "ci95_upper", "dispersion") := numeric()]
+results_regional$convergence <- logical()
+results_regional$warning <- character()
+```
+
+Loop through each region and test for association
+
+```{r}
+for (i in regional_tests$index) {
+  
+  # i <- 2
+  this_year <- regional_tests[index == (i), Year]
+  this_region <- regional_tests[index == (i), Region]
+  this_predictor_set <- regional_tests[index == (i), Predictors]
+  this_model_formula <- paste0(
+    "Tests ~ 1 + ", 
+    this_predictor_set) |> 
+    as.formula()
+  
+  # Get regression estimates for tests ~ index in year & region
+  mod <- glm.nb(formula = this_model_formula, control = glm.control(maxit = 32),
+                data = data_model[Year == (this_year) & 
+                                    GBDR7 == (this_region), ]
+  )
+  
+  # Make the assignment cleaner
+  num_predictors <- length(coef(mod))
+  clean_coefficients <- cbind(
+    tidy(mod)[1:num_predictors, 2:5], 
+    tryCatch(confint(mod)[1:num_predictors, ], 
+             error = function(e){
+               
+               res <- data.frame(x = rep(NA, num_predictors),
+                                 y = rep(NA, num_predictors))
+               colnames(res) <- c("2.5 %", "97.5 %")
+               rownames(res) <- c("(Intercept)", "CHE",
+                                  "UP", "log_PD", "Gini",
+                                  "EP", "GI", "VE")
+               
+               # Apparently the intercept is the problem here, just omit it!
+               res[c(2:num_predictors), ] <- confint(mod, parm = non_correlated_indices)
+               return(res)
+             }))
+  rownames(clean_coefficients)[1] <- "Intercept"
+  
+  # Save the model for plotting with jtools::plot_summs()
+  model_list[[i]] <- mod
+  
+  # Ensure rows are added correctly for each predictor
+  predictor_order <- results_regional[Year == (this_year) & Region == (this_region), Predictors]
+  
+  # I want results in a nice format
+  results_regional[Year == (this_year) & Region == (this_region), c(
+    "estimate",
+    "std_error",
+    "test_statistic", 
+    "p_value", 
+    "ci95_lower",
+    "ci95_upper"
+  ) := clean_coefficients[(predictor_order), ]]
+  
+  # Add dispersion and model information
+  results_regional[Year == (this_year) & Region == (this_region), 
+                   dispersion := mod$theta]
+  results_regional[Year == (this_year) & Region == (this_region), 
+                   warning := ifelse(is.null(mod$th.warn), NA, mod$th.warn)]
+  results_regional[Year == (this_year) & Region == (this_region), 
+                   convergence := mod$converged]
+}
+```
+
+Transform results to relative change
+
+```{r}
+# Transform estimates and CI to Incidence Rate Ratio (% increase/decrease from base)
+results_regional[, `:=`(rel_change = exp(estimate) - 1, 
+                        rel_change_2_5 = exp(ci95_lower) - 1, 
+                        rel_change_97_5 = exp(ci95_upper) - 1)]
+
+# refactor for facet order
+results_regional$Region <- relevel(factor(results_regional$Region), 2)
+```
+
+Formatted results for text
+
+```{r}
+#| include: false
+
+results_regional[, .(
+  Year, 
+  Region, 
+  Predictors,
+  paste0(
+    "RC", 
+    Year, 
+    "=",
+    signif(rel_change * 100, 2), 
+    "%, 95% CI [",
+    signif(rel_change_2_5 * 100, 2), 
+    "%, ",
+    signif(rel_change_97_5 * 100, 2),
+    "%]"
+  ))
+]
+
+# data[location=="Maldives", .(CHE, Testing20)]
+```
+
+
+save results
+
+```{r}
+fwrite(
+  x = results_regional[, .(
+    Year,
+    GBDR7 = Region,
+    Predictor = Predictors,
+    effect_estimate = estimate,
+    standard_error = std_error,
+    test_statistic = test_statistic,
+    p_value = p_value,
+    confidence_interval_lower = ci95_lower,
+    confidence_interval_upper = ci95_upper,
+    dispersion_parameter = dispersion,
+    relative_change = format(rel_change * 100, scientific = F),
+    relative_change_lower_ci = format(rel_change_2_5 * 100, scientific = F),
+    relative_change_upper_ci = format(rel_change_97_5 * 100, scientific = F)
+  )], 
+  file = "paper/tables/tc_regional_regression_sumstats.csv",
+  sep = ","
+)
+
+```
+
+### Forestplot
+
+* Local Effects
+* **Computation of CI95% failed for Central Europe, Eastern Europe, and Central Asia in 2021!**
+
+```{r}
+#| fig-width: 8
+#| fig-height: 7
+
+b <- seq(-150, 300, 50)
+b_l <- paste0(b, "%")
+
+# Custom forest plot
+p5 <- ggplot(results_regional[Predictors != "Intercept"],
+             aes(color = Year,
+                 y = Predictors)
+) +
+  facet_wrap(~ Region, labeller = labeller(Region = c(
+    "High-Income" = "High-Income", 
+    "Central Europe, Eastern Europe, and Central Asia" = "Central/Eastern Europe,\nCentral Asia", 
+    "Latin America and Caribbean" = "Latin America and\nCaribbean", 
+    "North Africa and Middle East" = "North Africa and\nMiddle East", 
+    "Southeast Asia, East Asia, and Oceania" = "Southeast Asia, East Asia\nand Oceania", 
+    "Sub-Saharan Africa" = "Sub-Saharan Africa"
+  ))) +
+  scale_x_continuous(breaks = b
+  ) +
+  coord_cartesian(xlim = c(-100, 300)) +
+  geom_vline(xintercept = 0, 
+             linetype = "dashed") +
+  geom_point(aes(x = rel_change * 100, 
+                 group = Year),
+             position = position_dodge2(width = 0.8, 
+                                        reverse = TRUE),
+             shape = 15, 
+             size = 3
+  ) +
+  geom_linerange(aes(xmin = rel_change_2_5 * 100, 
+                     xmax = rel_change_97_5 * 100,
+                     group = Year),
+                 position = position_dodge2(width = 0.8, 
+                                            reverse = TRUE)
+  ) + 
+  labs(x = "Relative Change in Testing Capacity [%]", y = "") +
+  theme(legend.position = "bottom")
+
+print(p5)
+plotly::ggplotly(p5)
+```
+
+Save results
+
+```{r}
+
+ggsave(p5, 
+       filename = "tc_regional_forestplot.pdf",
+       path = "paper/figures/",
+       device = "pdf", 
+       width = 9, 
+       height = 7, 
+       dpi = 150)
+```
+
+
+## Global COVID/MMR Vaccination (2021) & Mortality (2021) data
+
+Create new data object.
+
+```{r}
+data_vacc <- copy(data)
+data_vacc <- data_vacc[, .(
+  Vaccination21 = as.integer(Vaccination21),
+  Mortality20 = as.integer(Mortality20),
+  Mortality21 = as.integer(Mortality21),
+  location, 
+  Population,
+  GBDR7,
+  CHE = c(scale(CHE)), 
+  UP = c(scale(UP)), 
+  log_PD = c(scale(log_PD)), 
+  EP = c(scale(EP)), 
+  GI = c(scale(GI)), 
+  Gini = c(scale(Gini)), 
+  VE = c(scale(VE))
+)]
+```
+
+### Assemble data
+
+```{r}
+#| echo: false
+#| fig-width: 5
+#| fig-height: 3
+
+mmr <- rbindlist(
+  list(
+    mmr1[Period == "2021", .(ParentLocation, Location, Value, Indicator, IndicatorCode)],
+    mmr2[Period == "2021", .(ParentLocation, Location, Value, Indicator, IndicatorCode)]
+  )
+)
+
+# Plot distribution
+par(mfrow = c(1,2))
+hist(mmr[IndicatorCode == "WHS8_110", Value], main = "MCV1", xlab = "[%]")
+hist(mmr[IndicatorCode == "MCV2", Value], main = "MCV2", xlab = "[%]")
+par(mfrow = c(1,1))
+```
+
+Join MMR data to the remaining objects
+
+```{r}
+# Match data
+v1 <- venn2(
+  sort(unique(data$location)),
+  sort(unique(mmr$Location)), plotte = FALSE
+)
+
+# Manually re-assign country names to complete matching
+mmr$LocationMatched <- mmr$Location
+mmr[grepl(pattern = "Bolivia", LocationMatched), LocationMatched := "Bolivia"]
+mmr[grepl(pattern = "Côte d’Ivoire", LocationMatched), LocationMatched := "Cote d'Ivoire"]
+mmr[grepl(pattern = "Czech", LocationMatched), LocationMatched := "Czech Republic"]
+mmr[grepl(pattern = "Iran", LocationMatched), LocationMatched := "Iran"]
+mmr[grepl(pattern = "Macedonia", LocationMatched), LocationMatched := "North Macedonia"]
+mmr[grepl(pattern = "Russia", LocationMatched), LocationMatched := "Russia"]
+mmr[grepl(pattern = "Republic of Korea", LocationMatched), LocationMatched := "South Korea"]
+mmr[grepl(pattern = "Türkiye", LocationMatched), LocationMatched := "Turkey"]
+mmr[grepl(pattern = "United Kingdom of Great Britain and Northern Ireland", LocationMatched), LocationMatched := "United Kingdom"]
+mmr[grepl(pattern = "United States", LocationMatched), LocationMatched := "United States"]
+mmr[grepl(pattern = "Viet", LocationMatched), LocationMatched := "Vietnam"]
+
+# check whether everything matches
+v2 <- venn2(
+  sort(unique(data_vacc$location)),
+  sort(unique(mmr$LocationMatched)), 
+  plotte = FALSE
+)
+
+# Match MMR data
+mmr <-  dcast(
+  mmr, 
+  ParentLocation + Location + LocationMatched ~ IndicatorCode, 
+  value.var = "Value")
+m1 <- match(data_vacc$location, mmr$LocationMatched)
+stopifnot(all(!is.na(m1)))
+
+# Match the data
+data_vacc[ , c("MCV1", "MCV2") := mmr[(m1), .(WHS8_110, MCV2)]]
+```
+
+I need to rescale the MMR vaccination data to contain count data for the model.
+
+```{r}
+data_vacc[, MCV2_per_100k := ((MCV2/100) * 100000)]
+data_vacc[, Vaccination21 := as.integer(Vaccination21)]
+
+# relevel region for fit and plotting reference
+data_vacc$GBDR7 <- relevel(factor(data_vacc$GBDR7), 2)
+```
+
+Save data
+
+```{r}
+fwrite(x = data_vacc, file = "paper/tables/vaccination_data.csv")
+```
+
+
+## Compare Vaccination MMR vs. Covid (2021)
+
+### Regression Vaccination (MMR & Covid)
+
+```{r}
+# Don't use the scaled GI, not necessary
+non_correlated_indices <- c("CHE", "UP", "log_PD", "EP", "Gini", "GI", "VE")
+
+# Main Model Formula
+model_formula_cov <- paste0("Vaccination21 ~ 1 + GBDR7 + ",
+                            paste(non_correlated_indices, collapse = " + "))
+model_formula_mmr <- paste0("MCV2_per_100k ~ 1 + GBDR7 + ",
+                            paste(non_correlated_indices, collapse = " + "))
+
+# Model fit (including dispersion parameter theta estimation)
+mod_negbin_cov <- glm.nb(formula = model_formula_cov, data = data_vacc)
+mod_negbin_mmr <- glm.nb(formula = model_formula_mmr, data = data_vacc)
+
+# Summary of each model to 
+mod_negbin_cov |> tidy(conf.int = TRUE, exponentiate = TRUE) |> kable()
+mod_negbin_mmr |> tidy(conf.int = TRUE, exponentiate = TRUE) |> kable()
+
+# Save the coefficients
+mod_negbin_cov_coefs <- cbind(
+  mod_negbin_cov |> tidy() |> as.data.table(),
+  confint(mod_negbin_cov)
+)
+mod_negbin_mmr_coefs <- cbind(
+  mod_negbin_mmr |> tidy() |> as.data.table(),
+  confint(mod_negbin_mmr)
+)
+
+# join data for plotting
+mod_negbin_cov_coefs[, Vaccination := "Covid"]
+mod_negbin_mmr_coefs[, Vaccination := "MMR"]
+mod_negbin_vacc_coefs <- rbindlist(list(mod_negbin_cov_coefs, mod_negbin_mmr_coefs))
+
+# Transform estimates and CI to Incidence Rate Ratio (% increase/decrease from base)
+mod_negbin_vacc_coefs[, `:=`(exp_estimate = exp(estimate), 
+                             exp_2_5 = exp(`2.5 %`), 
+                             exp_97_5 = exp(`97.5 %`))]
+
+# Calculate the relative change in testing by each predictor increase
+mod_negbin_vacc_coefs[, `:=`(rel_change  = exp_estimate - 1, 
+                             rel_change_2_5 = exp_2_5 - 1, 
+                             rel_change_97_5 = exp_97_5 - 1)]
+
+# Create ordered factor to improve plotting
+mod_negbin_vacc_coefs[, term := factor(
+  term, 
+  ordered = T, 
+  levels = c(
+    "(Intercept)", 
+    "GBDR7Central Europe, Eastern Europe, and Central Asia", 
+    "GBDR7Latin America and Caribbean", 
+    "GBDR7North Africa and Middle East", 
+    "GBDR7Southeast Asia, East Asia, and Oceania", 
+    "GBDR7Sub-Saharan Africa", 
+    "CHE", 
+    "GI", 
+    "Gini", 
+    "VE",
+    "EP", 
+    "log_PD", 
+    "UP"
+  ) |> rev(), 
+  labels = c(
+    "(Intercept)", 
+    "GBDR7\n(Central/Eastern Europe, and Central Asia)", 
+    "GBDR7\n(Latin America and Caribbean)", 
+    "GBDR7\n(North Africa and Middle East)", 
+    "GBDR7\n(Southeast Asia, East Asia, and Oceania)", 
+    "GBDR7\n(Sub-Saharan Africa)", 
+    "CHE", 
+    "GI", 
+    "Gini", 
+    "VE",
+    "EP", 
+    "log(PD)", 
+    "UP"
+  ) |> rev(), 
+)]
+
+```
+
+Formatted result text effects.
+
+```{r}
+#| include: false
+
+mod_negbin_vacc_coefs[, .(
+  term, 
+  Vaccination, 
+  paste0(
+    "RC", 
+    "=",
+    signif(rel_change * 100, 2), 
+    "%, 95% CI [",
+    signif(rel_change_2_5 * 100, 2), 
+    "%, ",
+    signif(rel_change_97_5 * 100, 2),
+    "%]"
+  ))
+]
+```
+
+
+```{r}
+fwrite(mod_negbin_vacc_coefs[, .(
+  Vaccination,  
+  Predictor = term, 
+  effect_estimate = estimate,
+  standard_error = std.error,
+  test_statistic = statistic,
+  p_value = p.value,
+  confidence_interval_lower = `2.5 %`,
+  confidence_interval_upper = `97.5 %`,
+  relative_change = format(rel_change, scientific = F),
+  relative_change_lower_ci = format(rel_change_2_5, scientific = F),
+  relative_change_upper_ci = format(rel_change_97_5, scientific = F))
+], 
+file = "paper/tables/vaccination_global_regression_sumstats.csv"
+)
+```
+
+#### Forestplot
+
+Plot the results. Reference group for the Region effects is "High-Income". Displayed effects are independent of region
+and other indices and represent a global trend.
+
+```{r}
+#| fig-width: 8
+#| fig-height: 4
+
+# create dummy factor for facetting
+mod_negbin_vacc_coefs[, facet_dum := ifelse(grepl("GBDR7|Intercept", term), "A", "B")]
+
+# Custom breaks for the x axis to make effect size clear
+b <- seq(-150, 175, 25)
+
+# Custom forest plot
+p6 <- ggplot(mod_negbin_vacc_coefs[term != "(Intercept)"],
+             aes(color = Vaccination,
+                 y = term)
+) +
+  facet_wrap(~facet_dum, scales = "free_y") +
+  geom_vline(xintercept = 0, 
+             linetype = "dashed") +
+  geom_point(aes(x = rel_change * 100, 
+                 group = Vaccination),
+             position = position_dodge2(width = 0.8, reverse = TRUE),
+             shape = 15, 
+             size = 3
+  ) +
+  geom_linerange(aes(xmin = rel_change_2_5 * 100, 
+                     xmax = rel_change_97_5 * 100,
+                     group = Vaccination),
+                 position = position_dodge2(width = 0.8, reverse = TRUE)
+  ) + 
+  labs(x = "Relative Change in Vaccination Rate [%]", y = "") + 
+  scale_x_continuous(breaks = b) +
+  theme(legend.position = "bottom",
+        strip.text = element_blank())
+
+print(p6)
+```
+
+
+```{r}
+ggsave(p6, 
+       filename = "vacc_global_forestplot.tiff",
+       path = "paper/figures/",
+       device = "tiff", 
+       width = 10, 
+       height = 4, 
+       dpi = 150)
+```
+
+### Regional vaccination regression 2021
+
+```{r}
+# Model wants integers
+data$Vaccination21 <- as.integer(data$Vaccination21)
+ggplot(data, aes(y = Vaccination21, x = GI, col = GBDR7)) +
+  facet_wrap(~GBDR7) +
+  geom_point() +
+  labs(y = "Rate of Vaccination") +
+  theme(legend.position = "bottom")
+```
+
+
+```{r}
+# Create a object listing all models to fit
+regional_tests <- data_model_long[, expand.grid(
+  Region = unique(GBDR7),
+  Predictors = paste(non_correlated_indices, collapse = " + "),
+  stringsAsFactors = FALSE)
+] |> as.data.table()
+regional_tests[, index := 1:.N]
+model_list <- vector("list", nrow(regional_tests))
+names(model_list) <- paste(regional_tests$Region, regional_tests$Year, sep = ": ")
+
+# Save results for each predictor in year and region
+results_vacc_regional <- data_model_long[, expand.grid(
+  Region = unique(GBDR7),
+  Predictors = c("Intercept", non_correlated_indices),
+  stringsAsFactors = FALSE)
+] |> as.data.table()
+
+# create columns for all parameter estimates 
+results_vacc_regional[, c("estimate", "std_error",
+                          "test_statistic", "p_value", 
+                          "ci95_lower", "ci95_upper", "dispersion") := numeric()]
+results_vacc_regional$convergence <- logical()
+results_vacc_regional$warning <- character()
+```
+
+Loop through each region and test for association
+
+```{r}
+for (i in regional_tests$index) {
+  
+  # i <- 2
+  this_region <- regional_tests[index == (i), Region]
+  this_predictor_set <- regional_tests[index == (i), Predictors]
+  this_model_formula <- paste0(
+    "Vaccination21 ~ 1 + ", 
+    this_predictor_set) |> 
+    as.formula()
+  
+  # Get regression estimates for tests ~ index in year & region
+  mod <- glm.nb(formula = this_model_formula, control = glm.control(maxit = 32),
+                data = data[GBDR7 == (this_region), ]
+  )
+  
+  # Make the assignment cleaner
+  num_predictors <- length(coef(mod))
+  clean_coefficients <- cbind(
+    tidy(mod)[1:num_predictors, 2:5], 
+    tryCatch(confint(mod)[1:num_predictors, ], 
+             error = function(e){
+               
+               res <- data.frame(x = rep(NA, num_predictors),
+                                 y = rep(NA, num_predictors))
+               colnames(res) <- c("2.5 %", "97.5 %")
+               rownames(res) <- c("(Intercept)", "CHE",
+                                  "UP", "log_PD", "Gini",
+                                  "EP", "GI", "VE")
+               
+               # Apparently the intercept is the problem here, just omit it!
+               res[c(2:num_predictors), ] <- confint(mod, parm = non_correlated_indices)
+               return(res)
+             }))
+  rownames(clean_coefficients)[1] <- "Intercept"
+  
+  # Save the model for plotting
+  model_list[[i]] <- mod
+  
+  # Ensure rows are added correctly for each predictor
+  predictor_order <- results_vacc_regional[Region == (this_region), Predictors]
+  
+  # I want results in a nice format
+  results_vacc_regional[Region == (this_region), c(
+    "estimate",
+    "std_error",
+    "test_statistic", 
+    "p_value", 
+    "ci95_lower",
+    "ci95_upper"
+  ) := clean_coefficients[(predictor_order), ]]
+  
+  # Add dispersion and model information
+  results_vacc_regional[Region == (this_region), 
+                        dispersion := mod$theta]
+  results_vacc_regional[Region == (this_region), 
+                        warning := ifelse(is.null(mod$th.warn), NA, mod$th.warn)]
+  results_vacc_regional[Region == (this_region), 
+                        convergence := mod$converged]
+}
+```
+
+Transform results to relative change
+
+```{r}
+# Transform estimates and CI to Incidence Rate Ratio (% increase/decrease from base)
+results_vacc_regional[, `:=`(rel_change = exp(estimate) - 1, 
+                             rel_change_2_5 = exp(ci95_lower) - 1, 
+                             rel_change_97_5 = exp(ci95_upper) - 1)]
+
+# refactor for facet order
+results_vacc_regional$Region <- relevel(factor(results_vacc_regional$Region), 2)
+```
+
+Save.
+
+```{r}
+fwrite(results_vacc_regional[, .(
+  GBDR7 = Region,
+  Predictor = Predictors, 
+  effect_estimate = estimate,
+  standard_error = std_error,
+  test_statistic = test_statistic,
+  p_value = p_value,
+  confidence_interval_lower = ci95_lower,
+  confidence_interval_upper = ci95_upper,
+  dispersion_parameter = dispersion,
+  relative_change = format(rel_change, scientific = F),
+  relative_change_lower_ci = format(rel_change_2_5, scientific = F),
+  relative_change_upper_ci = format(rel_change_97_5, scientific = F))
+], 
+file = "paper/tables/vaccination_covid_regional_regression_sumstats.csv"
+)
+
+```
+
+
+```{r}
+#| fig-width: 8
+#| fig-height: 7
+
+b <- seq(-150, 300, 50)
+b_l <- paste0(b, "%")
+
+# Custom forest plot
+p7 <- ggplot(results_vacc_regional[Predictors != "Intercept"],
+             aes(y = Predictors)
+) +
+  facet_wrap(~ Region, scales = "free",
+             labeller = labeller(Region = c(
+               "High-Income" = "High-Income", 
+               "Central Europe, Eastern Europe, and Central Asia" = "Central/Eastern Europe,\nCentral Asia", 
+               "Latin America and Caribbean" = "Latin America and\nCaribbean", 
+               "North Africa and Middle East" = "North Africa and\nMiddle East", 
+               "Southeast Asia, East Asia, and Oceania" = "Southeast Asia, East Asia\nand Oceania", 
+               "Sub-Saharan Africa" = "Sub-Saharan Africa"
+             ))) +
+  scale_x_continuous(breaks = b) +
+  coord_cartesian(xlim = c(-100, 200)) +
+  geom_vline(xintercept = 0, 
+             linetype = "dashed") +
+  geom_point(aes(x = rel_change * 100),
+             position = position_dodge2(width = 0.8, 
+                                        reverse = TRUE),
+             shape = 15, 
+             size = 3,
+             col = scales::hue_pal()(2)[2]
+  ) +
+  geom_linerange(aes(xmin = rel_change_2_5 * 100, 
+                     xmax = rel_change_97_5 * 100),
+                 position = position_dodge2(width = 0.8, 
+                                            reverse = TRUE),
+                 col = scales::hue_pal()(2)[2]
+  ) + 
+  labs(x = "Relative Change in Vaccination rate [%]", y = "") +
+  theme(legend.position = "bottom")
+
+print(p7)
+```
+
+Save plot.
+
+```{r}
+ggsave(p7, 
+       filename = "vacc_regional_forestplot.tiff",
+       path = "paper/figures/",
+       device = "tiff", 
+       width = 9, 
+       height = 7, 
+       dpi = 150)
+```
+
+## Mortality Regression 2021
+
+### Frequentist Fit
+
+Frequentist model for 2020 does not converge!
+
+```{r}
+#| eval: true
+#| include: true
+
+# Model Fit
+model_mortality_21 <- paste0("Mortality21 ~ 1 + GBDR7 + ", 
+                             paste(non_correlated_indices, collapse = " + "))
+mod_mortality_21 <- glm.nb(formula = model_mortality_21, data = data_vacc)
+
+# Save the coefficients
+mod_mortality_21_coefs <- cbind(
+  mod_mortality_21 |> tidy() |> as.data.table(),
+  confint(mod_mortality_21)
+)
+
+# Transform estimates and CI to Incidence Rate Ratio (% increase/decrease from base)
+mod_mortality_21_coefs[, `:=`(exp_estimate = exp(estimate), 
+                              exp_2_5 = exp(`2.5 %`), 
+                              exp_97_5 = exp(`97.5 %`))]
+
+# Calculate the relative change in testing by each predictor increase
+mod_mortality_21_coefs[, `:=`(rel_change  = exp_estimate - 1, 
+                              rel_change_2_5 = exp_2_5 - 1, 
+                              rel_change_97_5 = exp_97_5 - 1)]
+
+# Create ordered factor to improve plotting
+mod_mortality_21_coefs[, term := factor(
+  term, 
+  ordered = T, 
+  levels = c(
+    "(Intercept)", 
+    "GBDR7Central Europe, Eastern Europe, and Central Asia", 
+    "GBDR7Latin America and Caribbean", 
+    "GBDR7North Africa and Middle East", 
+    "GBDR7Southeast Asia, East Asia, and Oceania", 
+    "GBDR7Sub-Saharan Africa", 
+    "CHE", 
+    "GI", 
+    "Gini", 
+    "VE",
+    "EP", 
+    "log_PD", 
+    "UP"
+  ) |> rev(), 
+  labels = c(
+    "(Intercept)", 
+    "GBDR7\n(Central/Eastern Europe, and Central Asia)", 
+    "GBDR7\n(Latin America and Caribbean)", 
+    "GBDR7\n(North Africa and Middle East)", 
+    "GBDR7\n(Southeast Asia, East Asia, and Oceania)", 
+    "GBDR7\n(Sub-Saharan Africa)", 
+    "CHE", 
+    "GI", 
+    "Gini", 
+    "VE",
+    "EP", 
+    "log(PD)", 
+    "UP"
+  ) |> rev()
+)]
+
+# create dummy factor for facetting
+mod_mortality_21_coefs[, facet_dum := ifelse(grepl("GBDR7|Intercept", term), "A", "B")]
+
+```
+
+Formatted result text effects.
+
+```{r}
+#| include: false
+
+mod_mortality_21_coefs[, .(
+  term, 
+  paste0(
+    "RC", 
+    "=",
+    signif(rel_change * 100, 2), 
+    "%, 95% CI [",
+    signif(rel_change_2_5 * 100, 2), 
+    "%, ",
+    signif(rel_change_97_5 * 100, 2),
+    "%]"
+  ))
+]
+```
+
+
+
+Save results.
+
+```{r}
+fwrite(mod_mortality_21_coefs[, .(
+  Predictor = term, 
+  effect_estimate = estimate,
+  standard_error = std.error,
+  test_statistic = statistic,
+  p_value = p.value,
+  confidence_interval_lower = `2.5 %`,
+  confidence_interval_upper = `97.5 %`,
+  relative_change = format(rel_change, scientific = F),
+  relative_change_lower_ci = format(rel_change_2_5, scientific = F),
+  relative_change_upper_ci = format(rel_change_97_5, scientific = F))
+], 
+file = "paper/tables/mortality_2021_global_regression_sumstats.csv"
+)
+```
+
+### Forestplot
+
+```{r}
+#| fig-width: 8
+#| fig-height: 5
+
+# Custom breaks for the x axis to make effect size clear
+b <- seq(-150, 600, 50)
+
+# Custom forest plot
+p8 <- ggplot(mod_mortality_21_coefs[term != "(Intercept)"],
+             aes(y = term)
+) +
+  facet_wrap(~facet_dum, scales = "free_y") +
+  geom_point(aes(x = rel_change * 100),
+             position = position_dodge2(width = 0.8, reverse = TRUE),
+             shape = 15, 
+             size = 3,
+             col = scales::hue_pal()(2)[2]
+  ) +
+  geom_linerange(aes(xmin = rel_change_2_5 * 100, 
+                     xmax = rel_change_97_5 * 100),
+                 col = scales::hue_pal()(2)[2]# 2021 color
+  ) + 
+  geom_vline(xintercept = 0, 
+             linetype = "dashed") +
+  labs(x = "Relative Change in Mortality [%]", y = "") + 
+  scale_x_continuous(breaks = b) +
+  theme(legend.position = "bottom", 
+        strip.text = element_blank())
+
+print(p8)
+```
+
+Save plot.
+
+```{r}
+ggsave(p8, 
+       filename = "mortality_global_forestplot.tiff",
+       path = "paper/figures/",
+       device = "tiff", 
+       width = 12, 
+       height = 4, 
+       dpi = 150)
+```
+
+
+## Regional Regression Mortality (LAC)
+
+```{r}
+data_vacc[GBDR7 == "Latin America and Caribbean", plot(Mortality21 ~ CHE)]
+data_vacc[GBDR7 == "Latin America and Caribbean", plot(Mortality20 ~ CHE)]
+
+# Model Fit
+model_mortality_20 <- paste0("Mortality20 ~ 1 + ", paste(non_correlated_indices, collapse = " + "))
+mod_mortality_20_lac <- glm.nb(formula = model_mortality_20, data = data_vacc[GBDR7 == "Latin America and Caribbean"])
+model_mortality_21 <- paste0("Mortality21 ~ 1 + ", paste(non_correlated_indices, collapse = " + "))
+mod_mortality_21_lac <- glm.nb(formula = model_mortality_21, data = data_vacc[GBDR7 == "Latin America and Caribbean"])
+
+# Save the coefficients
+mod_mortality_21_lac_coefs <- cbind(
+  mod_mortality_21_lac |> tidy() |> as.data.table(),
+  confint(mod_mortality_21_lac)
+)
+
+# Transform estimates and CI to Incidence Rate Ratio (% increase/decrease from base)
+mod_mortality_21_lac_coefs[, `:=`(exp_estimate = exp(estimate), 
+                              exp_2_5 = exp(`2.5 %`), 
+                              exp_97_5 = exp(`97.5 %`))]
+
+# Calculate the relative change in testing by each predictor increase
+mod_mortality_21_lac_coefs[, `:=`(rel_change  = exp_estimate - 1, 
+                              rel_change_2_5 = exp_2_5 - 1, 
+                              rel_change_97_5 = exp_97_5 - 1)]
+
+# Create ordered factor to improve plotting
+mod_mortality_21_lac_coefs[, term := factor(
+  term, 
+  ordered = T, 
+  levels = c(
+    "(Intercept)", 
+    "GBDR7Central Europe, Eastern Europe, and Central Asia", 
+    "GBDR7Latin America and Caribbean", 
+    "GBDR7North Africa and Middle East", 
+    "GBDR7Southeast Asia, East Asia, and Oceania", 
+    "GBDR7Sub-Saharan Africa", 
+    "CHE", 
+    "GI", 
+    "Gini", 
+    "VE",
+    "EP", 
+    "log_PD", 
+    "UP"
+  ) |> rev(), 
+  labels = c(
+    "(Intercept)", 
+    "GBDR7\n(Central/Eastern Europe, and Central Asia)", 
+    "GBDR7\n(Latin America and Caribbean)", 
+    "GBDR7\n(North Africa and Middle East)", 
+    "GBDR7\n(Southeast Asia, East Asia, and Oceania)", 
+    "GBDR7\n(Sub-Saharan Africa)", 
+    "CHE", 
+    "GI", 
+    "Gini", 
+    "VE",
+    "EP", 
+    "log(PD)", 
+    "UP"
+  ) |> rev()
+)]
+
+# create dummy factor for facetting
+mod_mortality_21_lac_coefs[, facet_dum := ifelse(grepl("GBDR7|Intercept", term), "A", "B")]
+```
+
+
+### Bayesian Fit 2020 & 2021
+
+```{r}
+# Main Model Formula
+model_mortality_20 <- paste0("Mortality20 ~ 1 + GBDR7 + ", 
+                             paste(non_correlated_indices, collapse = " + "))
+model_mortality_21 <- paste0("Mortality21 ~ 1 + GBDR7 + ", 
+                             paste(non_correlated_indices, collapse = " + "))
+
+# fit model
+stan_20 <- stan_glm(formula = model_mortality_20,
+                    family = neg_binomial_2(link = "log"), 
+                    data = data_vacc)
+stan_21 <- stan_glm(formula = model_mortality_21,
+                    family = neg_binomial_2(link = "log"), 
+                    data = data_vacc)
+
+# Get coefficients from the model 
+mod_mort_coefs <- data.table(
+  year = rep(c("2020", "2021"), each = length(coef(stan_21))),
+  coef = c(names(coef(stan_20)), names(coef(stan_21))),
+  estimate = c(coef(stan_20), coef(stan_21))
+)
+tmp <- rbindlist(
+  list(
+    as.data.frame(posterior_interval(stan_20)[c(1:13), ]),
+    as.data.frame(posterior_interval(stan_21)[c(1:13), ])
+  )
+)
+mod_mort_coefs[, c("lci", "uci") := tmp]
+
+# Transform estimates and CI to Incidence Rate Ratio (% increase/decrease from base)
+mod_mort_coefs[, `:=`(exp_estimate = exp(estimate), 
+                      exp_2_5 = exp(lci), 
+                      exp_97_5 = exp(uci))]
+
+# Calculate the relative change in testing by each predictor increase
+mod_mort_coefs[, `:=`(rel_change  = exp_estimate - 1, 
+                      rel_change_2_5 = exp_2_5 - 1, 
+                      rel_change_97_5 = exp_97_5 - 1)]
+
+# Create ordered factor to improve plotting
+mod_mort_coefs[, term := factor(
+  coef, 
+  ordered = T, 
+  levels = c(
+    "(Intercept)", 
+    "GBDR7Central Europe, Eastern Europe, and Central Asia", 
+    "GBDR7Latin America and Caribbean", 
+    "GBDR7North Africa and Middle East", 
+    "GBDR7Southeast Asia, East Asia, and Oceania", 
+    "GBDR7Sub-Saharan Africa", 
+    "CHE", 
+    "GI", 
+    "Gini", 
+    "VE",
+    "EP", 
+    "log_PD", 
+    "UP"
+  ) |> rev(), 
+  labels = c(
+    "(Intercept)", 
+    "GBDR7\n(Central/Eastern Europe, and Central Asia)", 
+    "GBDR7\n(Latin America and Caribbean)", 
+    "GBDR7\n(North Africa and Middle East)", 
+    "GBDR7\n(Southeast Asia, East Asia, and Oceania)", 
+    "GBDR7\n(Sub-Saharan Africa)", 
+    "CHE", 
+    "GI", 
+    "Gini", 
+    "VE",
+    "EP", 
+    "log(PD)", 
+    "UP"
+  ) |> rev()
+)]
+
+# create dummy factor for facetting
+mod_mort_coefs[, facet_dum := ifelse(grepl("GBDR7|Intercept", term), "A", "B")]
+
+# 
+mod_mort_coefs |> kable()
+```
+
+### Forestplot
+
+```{r}
+#| fig-width: 8
+#| fig-height: 5
+
+# Custom breaks for the x axis to make effect size clear
+b <- seq(-150, 600, 50)
+
+# Custom forest plot
+ggplot(mod_mort_coefs[term != "(Intercept)"],
+       aes(color = year,
+           y = term)
+) +
+  facet_wrap(~facet_dum, scales = "free_y") +
+  geom_point(aes(x = rel_change * 100, 
+                 group = year),
+             position = position_dodge2(width = 0.8, reverse = TRUE),
+             shape = 15, 
+             size = 3
+  ) +
+  geom_linerange(aes(xmin = rel_change_2_5 * 100, 
+                     xmax = rel_change_97_5 * 100,
+                     group = year),
+                 position = position_dodge2(width = 0.8, reverse = TRUE)
+  ) + 
+  geom_vline(xintercept = 0, 
+             linetype = "dashed") +
+  guides(color = guide_legend(title = "Year")) +
+  labs(x = "Relative Change in Mortality [%]", y = "") + 
+  scale_x_continuous(breaks = b) +
+  theme(legend.position = "bottom", 
+        strip.text = element_blank())
+```
+
+## Session Info
+
+```{r}
+sessioninfo::session_info()
+```
+
+

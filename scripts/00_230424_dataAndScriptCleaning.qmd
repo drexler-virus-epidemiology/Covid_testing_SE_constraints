@@ -1,0 +1,1078 @@
+---
+title: "Pandemie Dialog (PD): data and analysis migration"
+author: "Carl Beuchel"
+date: today
+theme: spacelab #sandstone #flatfly #spacelab
+highlight: pygments
+format:
+  html:
+    df-print: kable
+    fig-width: 8
+    fig-height: 6
+    code-fold: true
+    code-summary: "Show the code"
+    standalone: true
+    embed-resources: true
+output:
+  html_document:
+    code_download: true
+toc: true  
+toc-depth: 3
+number-sections: true
+toc-float:
+  smooth-scroll: true
+execute:
+  include: true
+  eval: true
+  echo: true
+  warning: false
+editor: source
+editor_options: 
+  chunk_output_type: console
+project:
+  type: default
+  preview:
+    port: 4200
+    browser: false
+---
+
+## Setup
+
+```{r}
+#| echo: true
+#| include: true
+
+# define alternative package directory
+r_on_cluster <- FALSE
+if (r_on_cluster == TRUE) {
+  bp <- "/???"
+  computer <- "???"
+  .libPaths(
+    paste0(
+      bp,
+      "???",
+      computer
+    )
+  )
+} else {
+  if (grepl(x = getwd(), pattern =  "carl")) {
+    bp <- "/home/carl/Dokumente/06_projects/"
+    
+    # set a more recent R snapshot as source repo
+    # r = getOption("repos") 
+    # r["CRAN"] = "https://mran.microsoft.com/snapshot/2022-12-08"
+    # options(repos = r)
+    # rm(r)
+  }
+}
+
+#+ load.packages, include=F
+
+# List of required packages
+required_packages <- c(
+  "renv",
+  "data.table",
+  "brms",
+  "here",
+  "broom",
+  "jtools",
+  "broom.mixed",
+  "readxl",
+  "Hmisc",
+  "sparkline",
+  "ggplot2",
+  "scales",
+  "ggrepel",
+  "ggthemes",
+  "corrplot",
+  "cowplot",
+  "plotly"
+)
+
+# Check if packages are installed, and if not, install them
+for (package in required_packages) {
+  if (!requireNamespace(package, quietly = TRUE)) {
+    install.packages(package)
+    library(package, character.only = TRUE)
+  }
+}
+
+
+for (i in c(
+  "renv",
+  "data.table",
+  "brms",
+  "here",
+  "broom",
+  "jtools",
+  "broom.mixed",
+  "readxl",
+  "Hmisc",
+  "sparkline",
+  "ggplot2",
+  "scales",
+  "ggrepel",
+  "ggthemes",
+  "corrplot",
+  "cowplot",
+  "plotly")
+  ) {
+  suppressPackageStartupMessages(
+    library(i, character.only = TRUE
+    ))}
+
+# Check unsuccessful updates packages
+# old.packages()
+
+# Update packages to that snapshot
+# update.packages(
+#   ask = FALSE, 
+#   checkBuilt = TRUE
+# )
+
+# ggplot theme
+ggplot2::theme_set(
+  theme_tufte(base_size = 14)  + 
+    theme(panel.background = element_rect(colour = "grey35")
+    )
+)
+
+# Knitr should use the project root and not the script location as root
+knitr::opts_knit$set(root.dir = here())
+knitr::opts_knit$set(base.dir = here("scripts"))
+print(here())
+
+# Give data.table enough threads
+writeLines(paste0("Threads available: ", parallel::detectCores()))
+writeLines(paste0("Threads given to data.table: ", parallel::detectCores() / 2))
+setDTthreads(parallel::detectCores() / 2)
+
+# Option setup for
+options(prType = 'html')
+options(knitr.table.format = "html")
+# options(grType = 'plotly')
+```
+
+## Load raw data
+
+I received the raw data for the analysis. No explanation or anything is given
+for any of the files.
+
+```{r}
+data_1 <- fread(here("data/raw-data/owid-covid-data_220208_22c8de6.txt"))
+data_2 <- fread(here("data/raw-data/data2.txt"))
+data_3 <- read_xlsx(here("data/raw-data/global burden disease region.xlsx")) |>
+  as.data.table()
+```
+
+Three files are available for analysis:
+
+- `data/raw-data/data2.txt`: Used for the main analysis
+- `data/raw-data/global burden disease region.xlsx`: Gives countries for global
+  regions used in the paper.
+- `data/raw-data/owid-covid-data_220208_22c8de6.txt`: Maybe the raw data
+
+### Explore the raw data
+
+Find some information about the first data and use it to annotate or name it. It
+looks like only the file `data/raw-data/data2.txt` was used in the analysis.
+
+Open Questions:
+
+* When was the data accessed?
+* Several variables have typos: 
+  * data_2: "Vccination21"
+
+Check on basic descriptive statistics like missingness.
+
+```{r}
+# Hmisc function to quickly scan for NAs in data
+contents(data_1)
+contents(data_2)
+contents(data_3)
+```
+
+This `describe()` call would be nice but currently the rendering fails when loading `qreport` package.
+
+```{r}
+#| eval: false
+
+d <- describe(data_2)
+html(d, size = 80, scroll = TRUE)
+```
+
+
+Summaries can also quickly be created using the `movStats()` function
+
+```{r}
+# A shorthand for calculating summaries using data.table
+writeLines("Number of tests 2020 per meta-region:")
+movStats(Testing20 ~ GBDR7,
+         discrete = TRUE,
+         data = data_2)
+
+writeLines("Number of tests 2021 per meta-region:")
+movStats(Testing21 ~ GBDR7,
+         discrete = TRUE,
+         data = data_2, )
+```
+
+Check the data sources. `data_2` contains per-country information on testing,
+indidences, mortality etc.
+
+```{r}
+# Check number of locations
+writeLines("Total number of countries:")
+data_2[, uniqueN(location)]
+
+# Number of entries per location
+writeLines("Countries per meta-region:")
+data_2[, .N, GBDR7]
+```
+
+Create a long-form version of the data and print summary information.
+
+```{r}
+# long format helps evaluate each variable
+data_2_long <- melt(data_2, id.vars = c("location", "GBDR7")) |> 
+  suppressWarnings()
+
+writeLines("Variables and missings per meta-region:")
+data_2_long[,.(
+  total_variables = uniqueN(variable),
+  total_locations = uniqueN(location),
+ total_NA = sum(is.na(value)),
+ relative_NA = signif(sum(is.na(value))/.N, 2)
+), GBDR7]
+
+```
+
+We also have longitudinal data available in `data_1`.
+
+```{r}
+writeLines("Variables and missings per meta-region (top 5):")
+data_1[, .(measurements = uniqueN(date)), .(continent, location)][order(-measurements)] |> 
+  head()
+
+# this is the classical longitudinal covid data
+data_1[continent == "", .N, location]
+```
+
+This is a nice new method to plot categorical information.
+
+```{r}
+
+
+# separately for each year to scan for differences
+plot(summaryM(Mortality20 + Testing20 + Incidence20 + Vaccination20 ~ GBDR7, 
+              data = data_2))
+plot(summaryM(Mortality21 + Testing21 + Incidence21 + Vccination21 ~ GBDR7,
+              data = data_2))
+```
+
+## Exploratory plots
+
+We have several indices, some are a combination of others, like the HDI or GI.
+
+```{r}
+all_indices <- c(
+  "HDI",
+  "LEB",
+  "EYS",
+  "MYS",
+  "GNI",
+  "GDP",
+  "CHE",
+  "GI",
+  "MMR",
+  "ABR",
+  "FLB",
+  "PSE",
+  "Gini",
+  "UP",
+  "PD",
+  "EP",
+  "VE",
+  "AAG"
+)
+
+# I want the column names to match the proper index names
+all_indices[!(all_indices %in% colnames(data_2))]
+
+# Correct typo in name
+setnames(data_2, "Vccination21", "Vaccination21")
+
+# UP
+setnames(x = data_2, "Urban", "UP")
+
+# I want to remember what indices are for what and how they are connected
+indices_structured <- list(
+  Wealth = list("HDI" = c("LEB", "EYS", "MYS", "GNI"), 
+                "GDP" = c(), 
+                "CHE" = c()
+                ),
+  Inequality = list("GI" = c("MMR", "ABR", "FLB", "PSE"),
+                    "Gini" = c()
+                    ),
+  Demographic_SES = list("UP" = c(),
+                         "PD" = c(),
+                         "EP" = c(),
+                         "VE" = c()
+                         ),
+  Governance = list("AAG" = c()),
+  "Mortality" = c(),
+  "Incidence" = c(),
+  "Vaccination" = c(),
+  "Test_Capacity" = c()
+)
+```
+
+### Index correlation
+
+I can plot basic overviews of the predictor data. First plot correlation of all
+variables.
+
+```{r}
+#|fig-width: 8
+#|fig-height: 8
+
+tmp <- data_2[, cor(.SD, method = "spearman"), .SDcols = c(all_indices)]
+corrplot(tmp, 
+         addCoef.col = "black", number.cex = .7)
+```
+
+Check correlation of the most important indices
+
+```{r}
+#|fig-width: 5
+#|fig-height: 5
+
+data_2$log_GDP <- log10(data_2$GDP)
+tmp <- data_2[, cor(.SD, method = "spearman"), 
+              .SDcols = c("GI", "Gini", "HDI", "AAG", "log_GDP")]
+corrplot(tmp, 
+         addCoef.col = "black", number.cex = .7)
+
+```
+
+Plot correlation of indices HDI & GI and their respective sub-indices.
+
+```{r}
+#|fig-width: 5
+#|fig-height: 5
+
+for (i in list(
+              c("HDI", indices_structured$Wealth$HDI),
+              c("GI", indices_structured$Inequality$GI)
+              )
+) {
+  tmp <- data_2[, cor(.SD,method = "spearman"), .SDcols = i]
+  corrplot(tmp, addCoef.col = "black")
+}
+
+# Clean up
+rm(tmp)
+
+# Scatter plot of index correlation
+data_2[, pairs(.SD), .SDcols = c("HDI", indices_structured$Wealth$HDI)]
+data_2[, pairs(.SD), .SDcols = c("GI", indices_structured$Inequality$GI)]
+data_2[, pairs(.SD), .SDcols = c("GI", "Gini", "HDI", "AAG", "log_GDP")]
+```
+
+### Index histograms
+
+Basic histograms of the predictors:
+
+```{r}
+#| fig-height: 12 
+#| fig-width: 6
+
+par(mfrow = c(6,3))
+options(grType = 'base')
+for (i in seq_along(all_indices)) {
+  
+  # i <- 1
+  hist(
+    unlist(data_2[, .SD, .SDcols = all_indices[i]]),
+    main = all_indices[i], 
+    xlab = NULL, 
+    ylab = NULL
+    )
+}
+
+
+options(grType = 'plotly')
+par(mfrow = c(1,1))
+```
+
+Create data for plotting.
+
+```{r}
+# For plotting by year I need to melt the data by year
+data_2_year <- melt(
+  data_2, 
+  id.vars =  c("location", "GBDR7"), 
+  measure.vars = c("Testing20", "Testing21"), 
+  variable.name = "Year", 
+  value.name = "Tests"
+)
+data_2_year[, Year := ifelse(Year == "Testing20", "2020", "2021")]
+
+# Get log of PD for plotting
+data_2$log_PD <- log10(data_2$PD)
+
+# select my interesting indices
+nci <- c("CHE", "UP", "log_PD", "EP", "GI", "VE")
+
+# Add the indices
+m1 <- match(data_2_year$location, data_2$location)
+data_2_year[, c(nci, "Population") := 
+              data_2[(m1), .SD, .SDcols = c((nci), "Population")]]
+
+# Plot data with their mean
+data_2_plot <- copy(data_2_year)
+
+# Melt again to plot all indices at the same time
+data_2_plot <- melt(data_2_plot, 
+                    measure.vars = nci, 
+                    variable.name = "Index", 
+                    value.name = "Value", 
+                    variable.factor = FALSE)
+
+```
+
+### Scatter plot of pooled data
+
+Scatter plot of TC with independent variables:
+
+```{r}
+#| fig-width: 8
+#| fig-height: 6
+
+
+# Simpsons Paradox 
+# ggplot(data_2_plot[Index != "GDP"]) +
+ggplot(data_2_plot) +
+  geom_point(aes(x = Value, 
+                 y = Tests, 
+                 col = GBDR7, 
+                 size = Population)) + 
+  facet_grid(Year ~ Index, scales = "free", 
+             labeller = labeller(.cols = c(CHE = "CHE", 
+                                           UP = "UP",
+                                           log_PD = "log(PD)",
+                                           EP = "EP",
+                                           GI = "GI",
+                                           VE = "VE")
+                                 )
+             ) + 
+  scale_y_continuous(
+    trans = "log10",
+    labels = trans_format("log10",
+                          math_format(10^.x))) +
+  annotation_logticks(sides = "l", 
+                      outside = T, 
+                      long = grid::unit(1.5, "mm"),
+                      mid = grid::unit(1.1, "mm"),
+                      short = grid::unit(.8, "mm")
+                      ) +
+  coord_cartesian(clip = "off") +
+  labs(y = "Testing", 
+       x = NULL) +
+  guides(size = "none") +
+  theme(legend.position = "bottom", 
+        legend.direction = "vertical",
+        legend.justification = "left", 
+        axis.ticks.y = element_blank(),
+        panel.spacing = unit(1, "lines")
+        ) +
+  geom_smooth(method = "lm", 
+              aes(x = Value, 
+                  y = Tests, 
+                  group = GBDR7, 
+                  col =  GBDR7), 
+              se = F,
+              formula = "y ~ x")
+```
+
+### Scatter plot per region
+
+Per-region display to illustrate the effect difference within the regions.
+
+```{r}
+#| fig-width: 8
+#| fig-height: 16
+
+# Simpsons Paradox 
+plot_list <- vector("list", length(nci))
+names(plot_list) <- nci
+
+for (i in seq_along(names(plot_list))) {
+  
+  index <- names(plot_list)[i]
+  
+  # i <- "GI"
+  p <- ggplot(data_2_plot[Index == (index)], 
+         aes(x = Value, 
+             y = Tests, 
+             col = GBDR7, 
+             size = Population)
+  ) +
+    geom_point() + 
+    facet_grid(Year ~ GBDR7) +
+    scale_y_continuous(
+      trans = "log10",
+      labels = trans_format("log10",
+                            math_format(10^.x))) +
+    annotation_logticks(sides = "l", outside = T) +
+    coord_cartesian(clip = "off") +
+    labs(y = "Testing", x = index) +
+    guides(size = "none") + 
+    theme(legend.position = "bottom", 
+          legend.direction = "vertical",
+          legend.justification = "left", 
+          axis.ticks.y = element_blank(),
+          strip.text.x = element_blank()) +
+  geom_smooth(method = "lm", 
+              aes(x = Value, 
+                  y = Tests, group = GBDR7), 
+              col = "indianred4",
+              formula = "y ~ x")
+  
+  # Log scale makes more sense for GDP
+  # if (index == "GDP") {
+  #   
+  #   p <- p + scale_x_continuous(
+  #     trans = "log10",
+  #     labels = trans_format("log10",
+  #                           math_format(10^.x)))
+  # 
+  # }
+  
+  # Remove all but the last legend for plotting
+  if (i != length(names(plot_list))) {
+    
+    p <- p + theme(legend.position = "none")
+    
+  }
+  
+  # Add to list
+  plot_list[[index]] <- p
+  
+}
+
+# Extract the color legend to plot separately
+legend <- get_legend(
+  # create some space to the left of the legend
+  last(plot_list)
+)
+
+# Remove from the plot to only plot extracted 
+plot_list[[6]] <- plot_list[[6]] + theme(legend.position = "none")
+plot_list[["Legend"]] <- legend
+
+# Plotting
+cowplot::plot_grid(plotlist = plot_list, ncol = 1)
+
+```
+
+### Boxplot of testing for each year
+
+Testing increase between 2020 & 2021
+
+```{r}
+ggplot(data_2_year, 
+       aes(y = Tests,
+           x = GBDR7, 
+           fill = Year)
+       ) +
+  geom_boxplot() +
+  annotation_logticks(sides = "b",
+                      outside = TRUE) +
+  theme(axis.ticks.x = element_blank()) +
+  scale_y_log10(
+    breaks = scales::trans_breaks("log10", function(x) 10^x),
+    labels = scales::trans_format("log10", scales::math_format(10^.x))
+  ) +
+  coord_flip(clip = "off")
+```
+
+## New analysis - Testing
+
+### Rescale data
+
+* PD outliers could become a problem --> use log10
+* GI on a *10 scale makes the effect more interpretable (effect of changes +- 0.1 instead of +- 1)
+
+```{r}
+# Use log of PD
+data_2$log_PD <- log10(data_2$PD)
+
+# compare raw with scaled data
+par(mfrow = c(1,2))
+data_2[, plot(log2(Testing20) ~ PD)]
+data_2[, plot(log2(Testing20) ~ log_PD)]
+par(mfrow = c(1,1))
+
+# Rescale testing for overview, remove those later
+data_2$log_Testing20 <- log2(data_2$Testing20)
+data_2$log_Testing21 <- log2(data_2$Testing21)
+
+# Rescale the GI to get the effect estimates in terms of 0.1 increase of GI
+data_2$GI_10 <- data_2$GI * 10
+```
+
+### Select predictors
+
+```{r}
+all_variables <- c("log_Testing20", "log_Testing21", 
+                   "GI", "HDI", "log_GDP", "CHE", 
+                   "UP", "log_PD", "EP", "VE", "AAG")
+
+# Select coefficients not highly correlated
+tmp <- data_2[, cor(.SD, method = "spearman"), 
+              .SDcols = (all_variables)]
+
+# Display correlation structure of indices again
+corrplot(tmp, 
+         addCoef.col = "black", 
+         number.cex = 1)
+
+# Check scatter plot of all index pairs
+data_2[, pairs(.SD), 
+       .SDcols = (all_variables)]
+
+data_2$log_Testing20 <- NULL
+data_2$log_Testing21 <- NULL
+
+# select all vars with > 0.8 correlation
+tmp_filter <- tmp |> 
+  as.data.table(keep.rownames = TRUE) |> 
+  melt.data.table(id.vars = "rn",
+                  variable.factor = FALSE)
+tmp_filter <- tmp_filter[rn != variable]
+
+# Remove indices that correlate higly!
+index_filter <- c("log_GDP", "HDI", "AAG", "log_Testing20", "log_Testing21")
+
+# Only take the non-correlated indices
+non_correlated_indices <- tmp_filter[!(rn %in% index_filter) & 
+                                       !(variable %in% index_filter), 
+                                     unique(c(rn, variable))]
+
+# Display correlation of these indices
+tmp_filter <- tmp_filter[!(rn %in% index_filter) & 
+             !(variable %in% index_filter)] |> 
+  dcast.data.table(rn ~ variable)
+tmp_filter[, rn := NULL]
+tmp_filter <- tmp_filter |> as.matrix()
+rownames(tmp_filter) <- colnames(tmp_filter)
+diag(tmp_filter) <- 1
+corrplot(tmp_filter, 
+         addCoef.col = "black", 
+         number.cex = 2, tl.cex = 2, cl.cex = 2)
+
+# Display pairwise scatter plots again
+data_2[, pairs(.SD), .SDcols = non_correlated_indices]
+```
+
+## Save data
+
+```{r}
+data_2$Testing20 <- as.integer(data_2$Testing20)
+data_2$Testing21 <- as.integer(data_2$Testing21)
+
+fwrite(data_2, file = "data/clean-data/owid-data.tsv", sep = "\t")
+```
+
+## Old analysis
+
+* Multiple testing correction?
+* Mean imputation?
+* "Since the FDR controls for the number of false positives among all rejected
+  null hypotheses, it implicitly accounts for the inflating effect of type I 
+  error produced by multicollinearity(17)" --> No?
+* No analysis described
+* Separation 2020/2021 a little arbitrary
+* Where is the data dictionary?
+* All variables µ=0, sd=1
+
+### Used packages
+
+```{r}
+#| eval: false
+
+# Cleaning
+library(openxlsx)
+library(tidyr)
+library(dplyr)
+
+# Old analysis
+library(psych)
+library(clusterSim)
+library(clustertend)
+
+# New Analysis
+library(clusterSim)
+library(jtools)
+library(parameters)
+library(see)
+library(performance)
+library(olsrr)
+library(MASS)
+library(mlbench)
+library(caret)
+library(ggstatsplot)
+library(jtools)
+library(ggstance)
+
+```
+
+### Analysis script
+
+This is the updated analysis script. I adapted it so it can run in this report.
+
+```{r}
+#| eval: false
+#| echo: true
+
+## data
+data <- copy(data_2)
+
+## data per year
+data_sub <- as.matrix(data[, -c(1:2, 6:14, 26, 36)]) ## 2020
+# data_sub<-as.matrix(data[,-c(1:6,11:14,26,36)])##2021
+
+## variables
+# indep<-data_sub[,-c(2:3,25:28)]##disaggragated 2020
+indep <- data_sub[, -c(2:3, 5:14, 17:21)] ## aggregated 2020
+
+# indep<-data_sub[,-c(2:4,26:29)]##disaggragated 2021
+# indep<-data_sub[,-c(2:4,6:15,18:22)]##aggregated 2021
+
+## data normalization
+library(clusterSim)
+indep <- data.Normalization(
+  indep, 
+  type = "n1",
+  normalization = "column",
+  na.rm = FALSE)
+indep <- as.data.frame(indep)
+
+
+############################################## FIRST MODEL
+### MLR
+library(jtools)
+model <- lm(Testing20 ~ ., data = indep)
+smodel <- summary(model) # for rse and p
+
+## print parameters
+library(parameters)
+pmodel <- model_parameters(model, summary = TRUE)
+write.csv2(pmodel, "param model.csv")
+
+## check mlr conditions
+library(see)
+library(performance)
+
+windows(width = 8, height = 5)
+check_model(model)
+
+################################################## wls model
+### Weighted Least Square Regression
+# define weights to use
+weight <- 1 / lm(abs(model$residuals) ~ model$fitted.values)$fitted.values^2
+
+# perform weighted least squares regression
+wls_model <- lm(Testing20 ~ ., data = indep, weights = weight)
+
+# Check the model summary
+swls <- summary(wls_model)
+swls
+summ(wls_model)
+
+pwls <- model_parameters(wls_model, summary = TRUE)
+write.csv2(wls_model, "param wls.csv")
+
+## check mlr conditions
+windows(width = 8, height = 4)
+check_model(wls_model, check = "pp_check")
+
+## check multicolinearity (VIF)
+ols_vif_tol(wls_model)
+
+################################################### variable selection
+# option 1 stepwise selection by AIC criteria
+library(olsrr)
+a <- ols_step_both_aic(model)
+b <- ols_step_both_aic(wls_model)
+plot(b)
+
+## option2
+library(MASS)
+library(mlbench)
+library(caret)
+
+step <- stepAIC(model, direction = "both", trace = FALSE)
+step <- stepAIC(wls_model, direction = "both", trace = FALSE)
+step
+
+## option 3 forward selection
+step.model <- train( # Testing20 ~., data = indep, weights = weight,
+  Testing20 ~ .,
+  data = indep,
+  method = "leapForward",
+  tuneGrid = data.frame(nvmax = 1:5),
+  trControl = train.control
+)
+
+step.model$results
+step.model$bestTune
+summary(step.model$finalModel)
+
+### option 4 subset
+sub <- ols_step_best_subset(model)
+sub <- ols_step_best_subset(wls_model)
+sub
+plot(sub)
+
+########################################### model with selected variables
+## stepAIC and subset selection
+model4 <- lm(Testing20 ~ GDP + PD + Urban + GI + HDI, data = indep, weights = weight)
+
+smodel4 <- summary(model4)
+smodel4
+summ(model4)
+
+pmodel4 <- model_parameters(model4, summary = TRUE)
+write.csv2(pmodel4, "param model4.csv")
+
+## check mlr conditions
+windows(width = 8, height = 5)
+check_model(model4, check = "pp_check")
+
+## check multicolinearity (VIF)
+ols_vif_tol(model4)
+
+### forward selection
+model5 <- lm(Testing20 ~ GDP + CHE + EP + AAG + HDI, data = indep, weights = weight)
+smodel5 <- summary(model5)
+smodel5
+summ(model5)
+
+pmodel5 <- model_parameters(model5, summary = TRUE)
+write.csv2(pmodel5, "param model5.csv")
+
+## check mlr conditions
+windows(width = 8, height = 5)
+check_model(model5, check = "pp_check")
+
+## check multicolinearity (VIF)
+ols_vif_tol(model5)
+
+#########################################################
+
+## visualization results
+library(ggstatsplot)
+windows(width = 8, height = 7)
+ggcoefstats(model)
+
+library(jtools)
+library(ggstance)
+windows(width = 6, height = 7)
+plot_summs(model, wls_model, model4, model5, omit.coefs = NULL) ## compare models
+
+
+## Extract the formula for each model
+
+# Extract coefficients and variable names from the model
+coefficients <- coef(model)
+# coefficients <- coef(wls_model)
+# coefficients <- coef(model4)
+# coefficients <- coef(model5)
+
+variable_names <- names(coefficients)[-1]
+
+# Create a simplified formula string
+formula_string <- paste(
+  "Testing20 =", round(coefficients[1], 2), "+",
+  paste(round(coefficients[-1], 2) * -1, variable_names, collapse = " + ")
+)
+formula_string
+
+```
+
+### Supplemental Code
+
+```{r}
+#| eval: false
+
+####################################################################################
+### 1. Preparing COVID-19 related data (Testing, mortality, incidence, vaccination)
+####################################################################################
+
+### Load Global Burden Disease Classification
+
+library(openxlsx)
+library(tidyr)
+library(dplyr)
+country_classification <- read.xlsx("C:/path/global burden disease region.xlsx")
+country_classification$GBDR7 <- as.factor(country_classification$GBDR7)
+
+
+### Load COVID-19 related data
+
+OWID <- read.csv("C:/path/owid-covid-data_220208_22c8de6.txt",sep=",")
+
+### Clean COVID-19 related data
+
+OWID$Month <- lubridate::ceiling_date(as.Date(OWID$date),unit="month")-1
+OWID$Year <- format(OWID$Month,"%Y")
+
+OWID_Monthly <- OWID %>% dplyr::group_by(iso_code,continent, location,Month,Year)  %>% 
+  dplyr::summarise(max_total_tests_per_Month=max(total_tests,na.rm = T),
+                   max_total_cases_per_Month=max(total_cases,na.rm = T),
+                   max_total_deaths_per_Month=max(total_deaths,na.rm = T),
+                   max_total_peopleVaccinated_per_Month=max(people_vaccinated,na.rm = T),
+                   population_InMonth=median(population),
+                   median_age_InMonth=median(median_age),
+                   population_density_InMonth=median(population_density)
+  ) %>%
+  arrange(iso_code,Month) %>% 
+  filter(Month < as.Date("2022-01-01")) %>%
+  filter(Month >= as.Date("2020-03-01")) %>%
+  ungroup()
+
+# Remove -Inf induced by using max(na.rm = T)
+OWID_Monthly$max_total_tests_per_Month[OWID_Monthly$max_total_tests_per_Month==-Inf]=NA
+OWID_Monthly$max_total_cases_per_Month[OWID_Monthly$max_total_cases_per_Month==-Inf]=NA
+OWID_Monthly$max_total_deaths_per_Month[OWID_Monthly$max_total_deaths_per_Month==-Inf]=NA
+OWID_Monthly$max_total_peopleVaccinated_per_Month[OWID_Monthly$max_total_peopleVaccinated_per_Month==-Inf]=NA
+
+# Fill Missing Months with NAs
+OWID_MonthlyExtended <- OWID_Monthly %>% complete(nesting(location,iso_code,continent),Month) 
+
+# Find Months with missing Entries
+OWID_MonthlyExtended$containsNA <- apply(OWID_MonthlyExtended[,c("max_total_tests_per_Month","max_total_cases_per_Month","max_total_deaths_per_Month")],1,function(y){any(is.na(y))})
+
+# Countries with values for at least 50% of Months
+countriesWithValidCaseTestDeathData <- OWID_MonthlyExtended %>% 
+  group_by(iso_code,continent,location) %>% 
+  summarise(missing= sum(containsNA),total = n()) %>% 
+  filter(missing/total<0.5) %>%
+  ungroup()
+
+# Calculate Values per Month from cumulative Values for Countries matching the number of minimal required datapoints
+OWID_explicit_Monthly <- OWID_Monthly %>% 
+  filter(iso_code %in% countriesWithValidCaseTestDeathData$iso_code)
+
+# List Countries with missing Region (External Data)
+OWID_explicit_Monthly_Region_Missing_External_Data <- left_join(OWID_explicit_Monthly, country_classification, by=c("iso_code"="Code")) %>%
+  filter(is.na(Region))
+
+# Get monthly data for countries with Region
+OWID_explicid_Monthly_Region <- left_join(OWID_explicit_Monthly, country_classification, by=c("iso_code"="Code")) %>%
+  filter(!is.na(Region))
+
+OWID_cumulative_Values_End2020<- OWID_explicid_Monthly_Region %>% 
+  filter(Year=="2020") %>%
+  group_by(iso_code) %>% 
+  summarise(
+    max20_tests = max(max_total_tests_per_Month,na.rm=T),
+    max20_cases = max(max_total_cases_per_Month,na.rm=T),
+    max20_deaths = max(max_total_deaths_per_Month,na.rm=T),
+    max20_peopleVaccinated = max(max_total_peopleVaccinated_per_Month,na.rm=T)
+  ) %>%
+  mutate(Year2substract="2021")
+
+OWID_cumulative_Values_End2020$max20_tests[OWID_cumulative_Values_End2020$max20_tests==-Inf] = NA
+OWID_cumulative_Values_End2020$max20_cases[OWID_cumulative_Values_End2020$max20_cases==-Inf] = NA
+OWID_cumulative_Values_End2020$max20_deaths[OWID_cumulative_Values_End2020$max20_deaths==-Inf] = NA
+OWID_cumulative_Values_End2020$max20_peopleVaccinated[OWID_cumulative_Values_End2020$max20_peopleVaccinated==-Inf] = NA
+
+OWID_cumulative_Values_End2021<- OWID_explicid_Monthly_Region %>% 
+  filter(Year=="2021") %>%
+  group_by(iso_code) %>% 
+  summarise(
+    max20_21_tests = max(max_total_tests_per_Month,na.rm=T),
+    max20_21_cases = max(max_total_cases_per_Month,na.rm=T),
+    max20_21_deaths = max(max_total_deaths_per_Month,na.rm=T),
+    max20_21_peopleVaccinated = max(max_total_peopleVaccinated_per_Month,na.rm=T)
+  )
+
+regionMeta <- OWID_explicid_Monthly_Region %>% select(iso_code,location, GBDR7,population_InMonth,median_age_InMonth,population_density_InMonth) %>% distinct()
+
+YearsMax <- full_join(OWID_cumulative_Values_End2020,OWID_cumulative_Values_End2021,by=c("iso_code"="iso_code")) %>%
+  mutate(
+    max21_tests=max20_21_tests-coalesce(max20_tests,0),
+    max21_cases=max20_21_cases-coalesce(max20_cases,0),
+    max21_deaths=max20_21_deaths-coalesce(max20_deaths,0),
+    max21_peopleVaccinated=max20_21_peopleVaccinated-coalesce(max20_peopleVaccinated,0)
+  ) %>%
+  left_join(regionMeta, by=c("iso_code"="iso_code")) %>%
+  mutate(
+    max21_tests_Per100k = max21_tests/population_InMonth*100000,
+    max21_cases_Per100k = max21_cases/population_InMonth*100000,
+    max21_deaths_Per100k = max21_deaths/population_InMonth*100000,
+    max21_peopleVaccinated_Per100k = max21_peopleVaccinated/population_InMonth*100000,
+    max20_tests_Per100k = max20_tests/population_InMonth*100000,
+    max20_cases_Per100k = max20_cases/population_InMonth*100000,
+    max20_deaths_Per100k = max20_deaths/population_InMonth*100000,
+    max20_peopleVaccinated_Per100k = max20_peopleVaccinated/population_InMonth*100000,
+  )
+
+#######################################################
+### 2. Data analysis
+#######################################################
+
+# Load clean dataset including all variables
+data <- read.csv("C:/path/data2.txt",sep="\t")
+
+## select data per year
+#c<- as.matrix(data[,-c(1:2,6:14,16:21,32,36)])## data for 2020
+c<- as.matrix(data[,-c(1:6,11:14,16:21,32,36)])## data for 2021
+
+## Calculate spearman correlation and false discovery rate
+
+#r and p-values for all regions
+library(psych)
+allw <- corr.test(c, method="spearman", adjust="fdr")
+p<-print(allw$p,quote=FALSE)#p-value
+r<-print(allw$r)#r-value
+
+#r and p-values for each GBD region
+region<-subset(data, GBDR7 == "Latin America and Caribbean", drop=FALSE)
+#region<-subset(data, GBDR7 == "High-Income", drop=FALSE)
+#region<-subset(data, GBDR7 == "Sub-Saharan Africa", drop=FALSE)
+#region<-subset(data, GBDR7 == "Central Europe, Eastern Europe, and Central Asia", drop=FALSE)
+#region<-subset(data, GBDR7 == "North Africa and Middle East", drop=FALSE)
+#region<-subset(data, GBDR7 == "Southeast Asia, East Asia, and Oceania", drop=FALSE)
+
+#region <- as.matrix(region[-c(1:2,6:14,16:21,32,36)])# data for 2020
+region <- as.matrix(region[,-c(1:6,11:14,16:21,32,36)])# data for 2021
+
+region <- corr.test(region, method="spearman", adjust="fdr")
+p<-print(region$p,quote=FALSE)#p-value
+r<-print(region$r)#r-value
+
+## Data normalization for PCA
+library(clusterSim)
+df.n<-data.Normalization(c, type="n1", normalization="column")
+rownames(df.n)<-data$location
+
+## Performing PCA
+pca<-prcomp(df.n)
+summary (pca)## selection of significant axess
+
+## Assessing clustering tendency on PCA results
+pca<-prcomp(df.n, center=TRUE, scale.=FALSE, rank. = 5)
+results <- pca$x #first five axis
+
+library(clustertend)
+hopkins(df.n, n=nrow(results)-1) # H<0.5 non clusterable
+
+
+
+
+```
+

@@ -1,0 +1,1186 @@
+---
+title: "Pandemie Dialog (PD): data and analysis migration"
+author: "Carl Beuchel"
+date: today
+theme: spacelab #sandstone #flatfly #spacelab
+highlight: pygments
+format:
+  html:
+    df-print: kable
+    fig-width: 8
+    fig-height: 6
+    code-fold: true
+    code-summary: "Show the code"
+    standalone: true
+    embed-resources: true
+output:
+  html_document:
+    code_download: true
+toc: true  
+toc-depth: 3
+number-sections: true
+toc-float:
+  smooth-scroll: true
+execute:
+  include: true
+  eval: true
+  echo: true
+  warning: false
+editor: source
+editor_options: 
+  chunk_output_type: console
+project:
+  type: default
+  preview:
+    port: 4200
+    browser: false
+---
+
+## Setup
+
+```{r}
+#| echo: true
+#| include: true
+
+# define alternative package directory
+r_on_cluster <- FALSE
+if (r_on_cluster == TRUE) {
+  bp <- "/???"
+  computer <- "???"
+  .libPaths(
+    paste0(
+      bp,
+      "???",
+      computer
+    )
+  )
+} else {
+  if (grepl(x = getwd(), pattern =  "carl")) {
+    bp <- "/home/carl/Dokumente/06_projects/"
+    
+    # set a more recent R snapshot as source repo
+    # r = getOption("repos") 
+    # r["CRAN"] = "https://mran.microsoft.com/snapshot/2022-12-08"
+    # options(repos = r)
+    # rm(r)
+  }
+}
+
+#+ load.packages, include=F
+for (i in c(
+  "renv",
+  "data.table",
+  "brms",
+  "here",
+  "broom",
+  "jtools",
+  "broom.mixed",
+  "readxl",
+  "Hmisc",
+  "sparkline",
+  "ggplot2",
+  "scales",
+  "ggrepel",
+  "ggthemes",
+  "corrplot",
+  "cowplot",
+  "plotly")
+  ) {
+  suppressPackageStartupMessages(
+    library(i, character.only = TRUE
+    ))}
+
+# Check unsuccessful updates packages
+# old.packages()
+
+# Update packages to that snapshot
+# update.packages(
+#   ask = FALSE, 
+#   checkBuilt = TRUE
+# )
+
+# ggplot theme
+ggplot2::theme_set(
+  theme_tufte(base_size = 14)  + 
+    theme(panel.background = element_rect(colour = "grey35"),
+          plot.background = element_rect(fill = "white", 
+                                         colour = NA)
+    )
+)
+
+
+# When within the Charite network or VPN, proxy settings need to be adapted
+chariteVPN <- TRUE
+if (chariteVPN) {
+    Sys.setenv(https_proxy = "proxy.charite.de:8080")
+    Sys.setenv(http_proxy = "proxy.charite.de:8080")
+}
+
+
+# Knitr should use the project root and not the script location as root
+knitr::opts_knit$set(root.dir = here())
+knitr::opts_knit$set(base.dir = here("scripts"))
+print(here())
+
+# Give data.table enough threads
+writeLines(paste0("Threads available: ", parallel::detectCores()))
+writeLines(paste0("Threads given to data.table: ", parallel::detectCores() / 2))
+setDTthreads(parallel::detectCores() / 2)
+
+# Option setup for
+options(prType = 'html')
+options(knitr.table.format = "html")
+# options(grType = 'plotly')
+```
+
+## Load raw data
+
+I received the raw data for the analysis. No explanation or anything is given
+for any of the files.
+
+```{r}
+#+ load.packages, include=F
+for (i in c(
+  "renv",
+  "data.table",
+  "brms",
+  "here",
+  "broom",
+  "jtools",
+  "broom.mixed",
+  "readxl",
+  "Hmisc",
+  "sparkline",
+  "ggplot2",
+  "scales",
+  "ggrepel",
+  "ggthemes",
+  "corrplot",
+  "cowplot",
+  "plotly", 
+  "pastecs")
+  ) {
+  suppressPackageStartupMessages(
+    library(i, character.only = TRUE
+    ))}
+
+data_1 <- fread(here("data/raw-data/owid-covid-data_220208_22c8de6.txt"))
+data_2 <- fread(here("data/raw-data/data2.txt"))
+data_3 <- read_xlsx(here("data/raw-data/global burden disease region.xlsx")) |>
+  as.data.table()
+```
+
+Three files are available for analysis:
+
+- `data/raw-data/data2.txt`: Used for the main analysis
+- `data/raw-data/global burden disease region.xlsx`: Gives countries for global
+  regions used in the paper.
+- `data/raw-data/owid-covid-data_220208_22c8de6.txt`: Maybe the raw data
+
+### Explore the raw data
+
+Find some information about the first data and use it to annotate or name it. It
+looks like only the file `data/raw-data/data2.txt` was used in the analysis.
+
+Open Questions:
+
+* When was the data accessed?
+* Several variables have typos: 
+  * data_2: "Vccination21"
+
+Check on basic descriptive statistics like missingness.
+
+```{r}
+# Hmisc function to quickly scan for NAs in data
+contents(data_1)
+contents(data_2)
+contents(data_3)
+```
+
+This `describe()` call would be nice but currently the rendering fails when loading `qreport` package.
+
+```{r}
+#| eval: false
+
+d <- describe(data_2)
+html(d, size = 100, scroll = TRUE)
+```
+
+
+Summaries can also quickly be created using the `movStats()` function
+
+```{r}
+# A shorthand for calculating summaries using data.table
+writeLines("Number of tests 2020 per meta-region:")
+movStats(Testing20 ~ GBDR7,
+         discrete = TRUE,
+         data = data_2)
+
+writeLines("Number of tests 2021 per meta-region:")
+movStats(Testing21 ~ GBDR7,
+         discrete = TRUE,
+         data = data_2)
+
+writeLines("GE per meta-region:")
+movStats(GI ~ GBDR7,
+         discrete = TRUE,
+         data = data_2)
+
+#descriptive statistics used for Figure 1
+sd(data_2$Testing21)
+describestats <-format (stat.desc(data_2), scientific=F, digits=2)
+describestats
+
+foldincreasetest <- data_2 %>% group_by(GBDR7) %>% select(GBDR7, Testing20, Testing21) %>% dplyr::summarise_at(c("Testing20", "Testing21"), mean, na.rm = TRUE)  %>% mutate (foldincrease = Testing21/ Testing20)
+
+foldincreasetest
+
+```
+
+Check the data sources. `data_2` contains per-country information on testing,
+indidences, mortality etc.
+
+```{r}
+# Check number of locations
+writeLines("Total number of countries:")
+data_2[, uniqueN(location)]
+
+# Number of entries per location
+writeLines("Countries per meta-region:")
+data_2[, .N, GBDR7]
+```
+
+Create a long-form version of the data and print summary information.
+
+```{r}
+# long format helps evaluate each variable
+data_2_long <- melt(data_2, id.vars = c("location", "GBDR7")) |> 
+  suppressWarnings()
+
+writeLines("Variables and missings per meta-region:")
+data_2_long[,.(
+  total_variables = uniqueN(variable),
+  total_locations = uniqueN(location),
+ total_NA = sum(is.na(value)),
+ relative_NA = signif(sum(is.na(value))/.N, 2)
+), GBDR7]
+
+```
+
+We also have longitudinal data available in `data_1`.
+
+```{r}
+writeLines("Variables and missings per meta-region (top 5):")
+data_1[, .(measurements = uniqueN(date)), .(continent, location)][order(-measurements)] |> 
+  head()
+
+# this is the classical longitudinal covid data
+data_1[continent == "", .N, location]
+```
+
+This is a nice new method to plot categorical information.
+
+```{r}
+# separately for each year to scan for differences
+plot(summaryM(Mortality20 + Testing20 + Incidence20 + Vaccination20 ~ GBDR7, 
+              data = data_2))
+plot(summaryM(Mortality21 + Testing21 + Incidence21 + Vccination21 ~ GBDR7,
+              data = data_2))
+```
+
+## Exploratory plots
+
+We have several indices, some are a combination of others, like the HDI or GI.
+
+```{r}
+all_indices <- c(
+  "HDI",
+  "LEB",
+  "EYS",
+  "MYS",
+  "GNI",
+  "GDP",
+  "CHE",
+  "GI",
+  "MMR",
+  "ABR",
+  "FLB",
+  "PSE",
+  "Gini",
+  "UP",
+  "PD",
+  "EP",
+  "VE",
+  "AAG"
+)
+
+# I want the column names to match the proper index names
+all_indices[!(all_indices %in% colnames(data_2))]
+
+# Correct typo in name
+setnames(data_2, "Vccination21", "Vaccination21")
+
+# UP
+setnames(x = data_2, "Urban", "UP")
+
+# I want to remember what indices are for what and how they are connected
+indices_structured <- list(
+  Wealth = list("HDI" = c("LEB", "EYS", "MYS", "GNI"), 
+                "GDP" = c(), 
+                "CHE" = c()
+                ),
+  Inequality = list("GI" = c("MMR", "ABR", "FLB", "PSE"),
+                    "Gini" = c()
+                    ),
+  Demographic_SES = list("UP" = c(),
+                         "PD" = c(),
+                         "EP" = c(),
+                         "VE" = c()
+                         ),
+  Governance = list("AAG" = c()),
+  "Mortality" = c(),
+  "Incidence" = c(),
+  "Vaccination" = c(),
+  "Test_Capacity" = c()
+)
+```
+
+### Index correlation
+
+I can plot basic overviews of the predictor data. First plot correlation of all
+variables.
+
+```{r}
+#|fig-width: 8
+#|fig-height: 8
+
+tmp <- data_2[, cor(.SD, method = "spearman"), .SDcols = c(all_indices)]
+corrplot(tmp, addCoef.col = "black", number.cex = .7)
+```
+
+```{r}
+tiff(
+  filename = "paper/figures/indices_spearman_corrplot.tiff", 
+  height = 8, 
+  width = 8,
+  res = 150, 
+  units = "in"
+  )
+corrplot(tmp, addCoef.col = "black", number.cex = .7)
+dev.off()
+```
+
+
+Plot correlation of indices HDI & GI and their respective sub-indices.
+
+```{r}
+#|fig-width: 5
+#|fig-height: 5
+
+for (i in list(
+              c("HDI", indices_structured$Wealth$HDI),
+              c("GI", indices_structured$Inequality$GI)
+              )
+) {
+  tmp <- data_2[, cor(.SD,method = "spearman"), .SDcols = i]
+  corrplot(tmp, addCoef.col = "black")
+}
+
+# Clean up
+rm(tmp)
+
+data_2$log_GDP <- log10(data_2$GDP)
+data_2$log_PD <- log10(data_2$PD)
+data_2$log_GNI <- log10(data_2$GNI)
+data_2$log_MMR <- log10(data_2$MMR)
+
+# all indices with log
+all_log_indices <- c("log_GDP", "log_PD", "log_GNI", "log_MMR", 
+                     all_indices[!(all_indices %in% c("GDP", "PD", "GNI", "MMR"))])
+
+# Scatter plot of index correlation
+data_2[, pairs(.SD), .SDcols = c("HDI", "LEB", "EYS", "MYS", "log_GNI")]
+data_2[, pairs(.SD), .SDcols = c("GI", "log_MMR", "ABR", "FLB", "PSE")]
+```
+
+### Index histograms
+
+Basic histograms of the predictors:
+
+```{r}
+#| fig-height: 12 
+#| fig-width: 6
+
+par(mfrow = c(6,3))
+options(grType = 'base')
+for (i in seq_along(all_log_indices)) {
+  
+  # i <- 1
+  hist(
+    unlist(data_2[, .SD, .SDcols = all_log_indices[i]]),
+    main = all_log_indices[i], 
+    xlab = NULL, 
+    ylab = NULL
+    )
+}
+
+
+options(grType = 'plotly')
+par(mfrow = c(1,1))
+```
+
+Save plot.
+
+```{r}
+tiff(
+  filename = "paper/figures/indices_hist.tiff", 
+  height = 12, 
+  width = 6,
+  res = 150, 
+  units = "in"
+  )
+
+par(mfrow = c(6,3))
+par(mar=c(1,1,1,1))
+options(grType = 'base')
+for (i in seq_along(all_log_indices)) {
+  
+  # i <- 1
+  hist(
+    unlist(data_2[, .SD, .SDcols = all_log_indices[i]]),
+    main = all_log_indices[i], 
+    xlab = NULL, 
+    ylab = NULL
+    )
+}
+
+
+options(grType = 'plotly')
+par(mfrow = c(1,1))
+dev.off()
+```
+
+Create data for plotting.
+
+```{r}
+# For plotting by year I need to melt the data by year
+data_2_year <- melt(
+  data_2, 
+  id.vars =  c("location", "GBDR7"), 
+  measure.vars = c("Testing20", "Testing21"), 
+  variable.name = "Year", 
+  value.name = "Tests"
+)
+data_2_year[, Year := ifelse(Year == "Testing20", "2020", "2021")]
+
+# Get log of PD for plotting
+data_2$log_PD <- log10(data_2$PD)
+
+# select my interesting indices
+nci <- c("CHE", "UP", "log_PD", "EP", "GI", "VE", "Gini")
+
+# Add the indices
+m1 <- match(data_2_year$location, data_2$location)
+data_2_year[, c(nci, "Population") := 
+              data_2[(m1), .SD, .SDcols = c((nci), "Population")]]
+
+# Plot data with their mean
+data_2_plot <- copy(data_2_year)
+
+# Melt again to plot all indices at the same time
+data_2_plot <- melt(data_2_plot, 
+                    measure.vars = nci, 
+                    variable.name = "Index", 
+                    value.name = "Value", 
+                    variable.factor = FALSE)
+#do some descriptive statistics of data_2_year, taht is used for the plot in the paper
+
+writeLines("Number of tests 2020 per meta-region:")
+movStats(Tests ~ GBDR7,
+         discrete = TRUE,
+         data = data_2_year)
+
+
+```
+
+### Scatter plot of pooled data
+
+Scatter plot of TC with independent variables:
+
+```{r}
+#| fig-width: 8
+#| fig-height: 6
+
+# Simpsons Paradox 
+# ggplot(data_2_plot[Index != "GDP"]) +
+p <- ggplot(data_2_plot) +
+  geom_point(aes(x = Value, 
+                 y = Tests, 
+                 col = GBDR7, 
+                 size = Population)) + 
+  facet_grid(Year ~ Index, scales = "free", 
+             labeller = labeller(.cols = c(CHE = "CHE", 
+                                           UP = "UP",
+                                           log_PD = "log(PD)",
+                                           EP = "EP",
+                                           GI = "GI",
+                                           Gini = "Gini",
+                                           VE = "VE")
+                                 )
+             ) + 
+  scale_y_continuous(
+    trans = "log10",
+    labels = trans_format("log10",
+                          math_format(10^.x))) +
+  annotation_logticks(sides = "l", 
+                      outside = T, 
+                      long = grid::unit(1.5, "mm"),
+                      mid = grid::unit(1.1, "mm"),
+                      short = grid::unit(.8, "mm")
+                      ) +
+  coord_cartesian(clip = "off") +
+  labs(y = "Testing", 
+       x = NULL) +
+  guides(size = guide_legend()) +
+  
+  scale_size_continuous() + 
+  
+  theme(legend.position = "bottom", 
+        legend.direction = "vertical",
+        legend.justification = "left", 
+        axis.ticks.y = element_blank(),
+        panel.spacing = unit(1, "lines")
+        ) +
+  geom_smooth(method = "lm", 
+              aes(x = Value, 
+                  y = Tests, 
+                  group = GBDR7, 
+                  col =  GBDR7), 
+              se = F,
+              formula = "y ~ x")
+
+print(p)
+```
+
+Save.
+
+```{r}
+ggsave(p, 
+       filename = "tc_regional_pooled_scatter.tiff",
+       path = "paper/figures/",
+       device = "tiff", 
+       width = 12, 
+       height = 6, 
+       dpi = 150)
+```
+
+
+### Scatter plot per region
+
+Per-region display to illustrate the effect difference within the regions.
+
+
+```{r}
+#| fig-width: 8
+#| fig-height: 20
+
+# Simpsons Paradox 
+plot_list <- vector("list", length(nci))
+names(plot_list) <- nci
+
+for (i in seq_along(names(plot_list))) {
+  
+  index <- names(plot_list)[i]
+  
+  # i <- "GI"
+  p <- ggplot(data_2_plot[Index == (index)], 
+         aes(x = Value, 
+             y = Tests, 
+             col = GBDR7, 
+             size = Population)
+  ) +
+    geom_point() + 
+    facet_grid(Year ~ GBDR7) +
+    scale_y_continuous(
+      trans = "log10",
+      labels = trans_format("log10",
+                            math_format(10^.x))) +
+    annotation_logticks(sides = "l", 
+                        outside = T, 
+                        long = grid::unit(1.5, "mm"),
+                        mid = grid::unit(0, "mm"),
+                        short = grid::unit(0, "mm")
+    ) +
+    coord_cartesian(clip = "off") +
+    labs(y = "Testing", x = index) +
+    guides(size = "none") + 
+    theme(legend.position = "bottom", 
+          legend.direction = "vertical",
+          legend.justification = "left", 
+          axis.ticks.y = element_blank(),
+          strip.text.x = element_blank()) +
+  geom_smooth(method = "lm", 
+              aes(x = Value, 
+                  y = Tests, group = GBDR7), 
+              col = "indianred4",
+              formula = "y ~ x")
+  
+  # Remove all but the last legend for plotting
+  if (i != length(names(plot_list))) {
+    
+    p <- p + theme(legend.position = "none")
+    
+  }
+  
+  # Add to list
+  plot_list[[index]] <- p
+  
+}
+
+# Extract the color legend to plot separately
+legend <- get_legend(
+  # create some space to the left of the legend
+  last(plot_list)
+)
+
+# Remove from the plot to only plot extracted 
+plot_list[[7]] <- plot_list[[7]] + theme(legend.position = "none")
+plot_list[["Legend"]] <- legend
+
+# Plotting
+cowplot::plot_grid(plotlist = plot_list, ncol = 1)
+
+```
+
+Save
+
+```{r}
+ggsave(cowplot::plot_grid(plotlist = plot_list, ncol = 1) + 
+         theme(plot.background = element_rect(fill = "white", 
+                                              color = NA)), 
+       filename = "tc_regional_separate_scatter.tiff",
+       path = "paper/figures/",
+       device = "tiff", 
+       width = 8, 
+       height = 20, 
+       dpi = 150)
+```
+
+
+### Boxplot of testing for each year
+
+Testing increase between 2020 & 2021
+
+```{r}
+p1 <- ggplot(data_2_year, 
+       aes(y = Tests,
+           x = GBDR7, 
+           fill = Year)
+       ) +
+  geom_boxplot() +
+  annotation_logticks(sides = "b",
+                      outside = TRUE) +
+  theme(axis.ticks.x = element_blank()) +
+  scale_y_log10(
+    breaks = scales::trans_breaks("log10", function(x) 10^x),
+    labels = scales::trans_format("log10", scales::math_format(10^.x))
+  ) +
+  #scale_fill_manual(values = c("darkred", "darkgray"))+
+  coord_flip(clip = "off") +
+  theme(axis.title.y = element_blank(), axis.text.y = element_blank(),  
+        legend.position = "bottom")
+p1
+
+```
+
+### Boxplot of Vaccination and Mortality for each year
+
+For Vaccination
+
+```{r}
+# For plotting by year I need to melt the data by year
+data_2_vacc <- melt(
+  data_2, 
+  id.vars =  c("location", "GBDR7"), 
+  measure.vars = c("Vaccination20", "Vaccination21"), 
+  variable.name = "Year", 
+  value.name = "Vaccination"
+)
+data_2_vacc[, Year := ifelse(Year == "Vaccination20", "2020", "2021")]
+
+p2 <- ggplot(data_2_vacc[Year == "2021"], 
+       aes(y = Vaccination,
+           x = GBDR7, 
+           fill = Year)
+       ) +
+  geom_boxplot() +
+  scale_fill_manual(values = scales::hue_pal()(2)[2]) +
+  annotation_logticks(sides = "b",
+                      outside = TRUE) +
+  theme(axis.ticks.x = element_blank()) +
+  scale_y_log10(
+    breaks = scales::trans_breaks("log10", function(x) 10^x),
+    labels = scales::trans_format("log10", scales::math_format(10^.x))
+  ) +
+  coord_flip(clip = "off") +
+  #scale_fill_manual(values =c("darkgray"))+
+  coord_flip(clip = "off") +
+  theme(axis.title.y = element_blank(), axis.text.y = element_blank(),  
+        legend.position = "bottom")
+p2
+```
+
+For Mortality
+
+```{r}
+# For plotting by year I need to melt the data by year
+data_2_mort <- melt(
+  data_2, 
+  id.vars =  c("location", "GBDR7"), 
+  measure.vars = c("Mortality20", "Mortality21"), 
+  variable.name = "Year", 
+  value.name = "Mortality"
+)
+data_2_mort[, Year := ifelse(Year == "Mortality20", "2020", "2021")]
+
+p3 <- ggplot(data_2_mort, 
+       aes(y = Mortality,
+           x = GBDR7, 
+           fill = Year)
+       ) +
+  geom_boxplot() +
+  annotation_logticks(sides = "b",
+                      outside = TRUE) +
+  theme(axis.ticks.x = element_blank()) +
+  scale_y_log10(
+    breaks = scales::trans_breaks("log10", function(x) 10^x),
+    labels = scales::trans_format("log10", scales::math_format(10^.x))
+  ) +
+  coord_flip(clip = "off") +
+  #scale_fill_manual(values = c("darkred", "darkgray"))+
+  coord_flip(clip = "off") +
+  theme(axis.title.y = element_blank(), axis.text.y = element_blank(),  
+        legend.position = "bottom")
+p3
+```
+
+Display as cowplot
+
+```{r}
+#| fig-width: 4
+#| fig-height: 6
+
+legend <- get_legend(p1)
+plot_list <- list(p1 + theme(legend.position = "none"), 
+                  p3 + theme(legend.position = "none"),
+                  p2 + theme(legend.position = "none"),
+                  legend)
+
+# Plotting
+cp <- cowplot::plot_grid(plotlist = plot_list,
+                   rel_heights = c(3,3,2,.6), 
+                   ncol = 3, labels = c("A", "B", "C")) + 
+         theme(plot.background = element_rect(fill = "white", 
+                                              color = NA))
+
+print(cp)
+```
+
+Save.
+
+```{r}
+ggsave(cp, 
+       filename = "tc_vacc_mort_boxplot2.pdf",
+       #path = "paper/figures",
+       device = "pdf", 
+       width = 6, 
+       height = 10, 
+       dpi = 150)
+
+```
+
+
+## New analysis - Testing
+
+### Rescale data
+
+* PD outliers could become a problem --> use log10
+* GI on a *10 scale makes the effect more interpretable (effect of changes +- 0.1 instead of +- 1)
+
+```{r}
+#| fig-width: 5
+#| fig-height: 5
+
+# Use log of PD
+data_2$log_PD <- log10(data_2$PD)
+
+# Rescale the GI to get the effect estimates in terms of 0.1 increase of GI
+data_2$GI_10 <- data_2$GI * 10
+
+# compare raw with scaled data
+par(mfrow = c(2,2))
+data_2[, plot(log2(Testing20) ~ PD, pch = 19)]
+data_2[, plot(log2(Testing20) ~ log_PD, pch = 19)]
+data_2[, hist(PD)]
+data_2[, hist(log_PD)]
+par(mfrow = c(1,1))
+
+# Rescale testing for overview, remove those later
+data_2$log_Testing20 <- log2(data_2$Testing20)
+data_2$log_Testing21 <- log2(data_2$Testing21)
+
+data_2$log_Mortality20 <- log2(data_2$Mortality20)
+data_2$log_Mortality21 <- log2(data_2$Mortality21)
+```
+
+```{r}
+tiff(
+  filename = "paper/figures/pd_transformation.tiff", 
+  height = 5, 
+  width = 5,
+  res = 150, 
+  units = "in"
+  )
+par(mfrow = c(2,2))
+data_2[, plot(log2(Testing20) ~ PD, pch = 19)]
+data_2[, plot(log2(Testing20) ~ log_PD, pch = 19)]
+data_2[, hist(PD)]
+data_2[, hist(log_PD)]
+par(mfrow = c(1,1))
+dev.off()
+```
+
+
+### Select predictors
+
+Corrplot of all variables
+
+```{r}
+all_variables <- c("log_Testing20", "log_Testing21", "Vaccination21",
+                   "log_Mortality20", "log_Mortality21",
+                   "GI", "Gini", "HDI", "log_GDP", "CHE", 
+                   "UP", "log_PD", "EP", "VE", "AAG")
+
+# Select coefficients not highly correlated
+tmp <- data_2[, cor(.SD, method = "spearman"), 
+              .SDcols = (all_variables)]
+
+# Display correlation structure of indices again
+corrplot(tmp, 
+         addCoef.col = "black", 
+         number.cex = 1)
+```
+
+```{r}
+tiff(
+  filename = "paper/figures/all_variables_spearman_corrplot.tiff", 
+  height = 8, 
+  width = 8,
+  res = 150, 
+  units = "in"
+  )
+corrplot(tmp, addCoef.col = "black", number.cex = .7)
+dev.off()
+
+```
+
+Pairs plot of all variables
+
+```{r}
+# Check scatter plot of all index pairs
+data_2[, pairs(.SD), 
+       .SDcols = (all_variables)]
+
+tiff(
+  filename = "paper/figures/all_variables_pairs.tiff", 
+  height = 11, 
+  width = 11,
+  res = 150, 
+  units = "in"
+  )
+data_2[, pairs(.SD, pch = 20, cex = .8, cex.labels = .7), 
+       .SDcols = (all_variables)]
+dev.off()
+
+data_2$log_Testing20 <- NULL
+data_2$log_Testing21 <- NULL
+data_2$log_Mortality20 <- NULL
+data_2$log_Mortality21 <- NULL
+```
+
+Show only the selected indices.
+
+```{r}
+# select all vars with > 0.8 correlation
+tmp_filter <- tmp |> 
+  as.data.table(keep.rownames = TRUE) |> 
+  melt.data.table(id.vars = "rn",
+                  variable.factor = FALSE)
+tmp_filter <- tmp_filter[rn != variable]
+
+# Remove indices that correlate higly!
+index_filter <- c("log_GDP", "HDI", "AAG", 
+                  "log_Testing20",
+                  "log_Testing21",
+                  "Vaccination21",
+                  "log_Mortality20",
+                  "log_Mortality21")
+
+# Only take the non-correlated indices
+non_correlated_indices <- tmp_filter[!(rn %in% index_filter) & 
+                                       !(variable %in% index_filter), 
+                                     unique(c(rn, variable))]
+
+# Display correlation of these indices
+tmp_filter <- tmp_filter[!(rn %in% index_filter) & 
+             !(variable %in% index_filter)] |> 
+  dcast.data.table(rn ~ variable)
+tmp_filter[, rn := NULL]
+tmp_filter <- tmp_filter |> as.matrix()
+rownames(tmp_filter) <- colnames(tmp_filter)
+diag(tmp_filter) <- 1
+```
+
+Plotting
+
+```{r}
+corrplot(tmp_filter, 
+         addCoef.col = "black", 
+         number.cex = 1.3, tl.cex = 1.5, cl.cex = 1.5)
+
+# Display pairwise scatter plots again
+data_2[, pairs(.SD, 
+               pch = 20,
+               cex = .8,
+               cex.labels = 1), 
+       .SDcols = non_correlated_indices]
+```
+
+Save plots
+
+```{r}
+tiff(
+  filename = "paper/figures/main_variables_spearman_corrplot.tiff", 
+  height = 8, 
+  width = 8,
+  res = 150, 
+  units = "in"
+  )
+corrplot(tmp_filter, 
+         addCoef.col = "black", 
+         number.cex = 1.3, tl.cex = 1.5, cl.cex = 1.5)
+
+dev.off()
+
+tiff(
+  filename = "paper/figures/main_variables_pairs.tiff", 
+  height = 8, 
+  width = 8,
+  res = 150, 
+  units = "in"
+  )
+data_2[, pairs(.SD, 
+               pch = 20,
+               cex = .8,
+               cex.labels = 1), 
+       .SDcols = non_correlated_indices]
+
+dev.off()
+
+```
+
+
+## Save data
+
+```{r}
+data_2$Testing20 <- as.integer(data_2$Testing20)
+data_2$Testing21 <- as.integer(data_2$Testing21)
+
+fwrite(data_2, file = "data/clean-data/owid-data.tsv", sep = "\t")
+```
+
+## Old analysis
+
+### Supplemental Code
+
+```{r}
+#| eval: false
+
+####################################################################################
+### 1. Preparing COVID-19 related data (Testing, mortality, incidence, vaccination)
+####################################################################################
+
+### Load Global Burden Disease Classification
+
+library(readxl)
+library(tidyr)
+library(dplyr)
+
+
+country_classification <- readxl::read_xlsx("data/raw-data/global burden disease region.xlsx")
+country_classification$GBDR7 <- as.factor(country_classification$GBDR7)
+
+
+### Load COVID-19 related data
+
+OWID <- read.csv("data/raw-data/owid-covid-data_220208_22c8de6.txt", sep = ",")
+
+### Clean COVID-19 related data
+
+OWID$Month <- lubridate::ceiling_date(
+  as.Date(OWID$date),
+  unit = "month") - 1
+OWID$Year <- format(OWID$Month,"%Y")
+OWID_Monthly <- OWID %>%
+  dplyr::group_by(
+    iso_code,
+    continent,
+    location,
+    Month,
+    Year
+  ) %>%
+  dplyr::summarise(
+    max_total_tests_per_Month = max(total_tests, na.rm = T),
+    max_total_cases_per_Month = max(total_cases, na.rm = T),
+    max_total_deaths_per_Month = max(total_deaths, na.rm = T),
+    max_total_peopleVaccinated_per_Month = max(people_vaccinated, na.rm = T),
+    population_InMonth = median(population),
+    median_age_InMonth = median(median_age),
+    population_density_InMonth = median(population_density)
+  ) %>%
+  arrange(iso_code, Month) %>%
+  filter(Month < as.Date("2022-01-01")) %>%
+  filter(Month >= as.Date("2020-03-01")) %>%
+  ungroup()
+
+# Remove -Inf induced by using max(na.rm = T)
+OWID_Monthly$max_total_tests_per_Month[OWID_Monthly$max_total_tests_per_Month == -Inf] <- NA
+OWID_Monthly$max_total_cases_per_Month[OWID_Monthly$max_total_cases_per_Month == -Inf] <- NA
+OWID_Monthly$max_total_deaths_per_Month[OWID_Monthly$max_total_deaths_per_Month == -Inf] <- NA
+OWID_Monthly$max_total_peopleVaccinated_per_Month[OWID_Monthly$max_total_peopleVaccinated_per_Month == -Inf] <- NA
+
+# Fill Missing Months with NAs
+OWID_MonthlyExtended <- OWID_Monthly %>% 
+  complete(
+    nesting(
+      location,
+      iso_code,
+      continent),
+    Month) 
+
+# Find Months with missing Entries
+OWID_MonthlyExtended$containsNA <- apply(
+  OWID_MonthlyExtended[,c(
+    "max_total_tests_per_Month",
+    "max_total_cases_per_Month",
+    "max_total_deaths_per_Month"
+  )], 1, function(y) {
+    any(is.na(y))
+  }
+)
+
+# Countries with values for at least 50% of Months
+countriesWithValidCaseTestDeathData <- OWID_MonthlyExtended %>%
+  group_by(iso_code, continent, location) %>%
+  summarise(missing = sum(containsNA), total = n()) %>%
+  filter(missing / total < 0.5) %>%
+  ungroup()
+
+# Calculate Values per Month from cumulative Values for Countries matching the
+# number of minimal required data points
+OWID_explicit_Monthly <- OWID_Monthly %>%
+  filter(iso_code %in% countriesWithValidCaseTestDeathData$iso_code)
+
+# TODO: What happens here? Variable is not used
+# List Countries with missing Region (External Data)
+OWID_explicit_Monthly_Region_Missing_External_Data <- left_join(
+  OWID_explicit_Monthly, 
+  country_classification, 
+  by = c("iso_code" = "Code")
+  ) %>%
+  filter(is.na(Region))
+
+# Get monthly data for countries with Region
+OWID_explicid_Monthly_Region <- left_join(
+  OWID_explicit_Monthly, 
+  country_classification, 
+  by = c("iso_code" = "Code")
+  ) %>%
+  filter(!is.na(Region))
+
+OWID_cumulative_Values_End2020 <- OWID_explicid_Monthly_Region %>%
+  filter(Year == "2020") %>%
+  group_by(iso_code) %>%
+  summarise(
+    max20_tests = max(max_total_tests_per_Month, na.rm = T),
+    max20_cases = max(max_total_cases_per_Month, na.rm = T),
+    max20_deaths = max(max_total_deaths_per_Month, na.rm = T),
+    max20_peopleVaccinated = max(max_total_peopleVaccinated_per_Month, na.rm = T)
+  ) %>%
+  mutate(Year2substract = "2021")
+
+OWID_cumulative_Values_End2020$max20_tests[OWID_cumulative_Values_End2020$max20_tests == -Inf] <- NA
+OWID_cumulative_Values_End2020$max20_cases[OWID_cumulative_Values_End2020$max20_cases == -Inf] <- NA
+OWID_cumulative_Values_End2020$max20_deaths[OWID_cumulative_Values_End2020$max20_deaths == -Inf] <- NA
+OWID_cumulative_Values_End2020$max20_peopleVaccinated[OWID_cumulative_Values_End2020$max20_peopleVaccinated == -Inf] <- NA
+
+
+OWID_cumulative_Values_End2021 <- OWID_explicid_Monthly_Region %>%
+  filter(Year == "2021") %>%
+  group_by(iso_code) %>%
+  summarise(
+    max20_21_tests = max(max_total_tests_per_Month, na.rm = T),
+    max20_21_cases = max(max_total_cases_per_Month, na.rm = T),
+    max20_21_deaths = max(max_total_deaths_per_Month, na.rm = T),
+    max20_21_peopleVaccinated = max(max_total_peopleVaccinated_per_Month, na.rm = T)
+  )
+
+regionMeta <- OWID_explicid_Monthly_Region %>%
+  select(
+    iso_code, 
+    location, 
+    GBDR7, 
+    population_InMonth, 
+    median_age_InMonth,
+    population_density_InMonth
+  ) %>%
+  distinct()
+
+YearsMax <- full_join(
+  OWID_cumulative_Values_End2020, 
+  OWID_cumulative_Values_End2021, 
+  by = c("iso_code" = "iso_code")
+  ) %>%
+  mutate(
+    max21_tests = max20_21_tests - coalesce(max20_tests, 0),
+    max21_cases = max20_21_cases - coalesce(max20_cases, 0),
+    max21_deaths = max20_21_deaths - coalesce(max20_deaths, 0),
+    max21_peopleVaccinated = max20_21_peopleVaccinated - coalesce(max20_peopleVaccinated, 0)
+  ) %>%
+  left_join(regionMeta, by = c("iso_code" = "iso_code")) %>%
+  mutate(
+    max21_tests_Per100k = max21_tests / population_InMonth * 100000,
+    max21_cases_Per100k = max21_cases / population_InMonth * 100000,
+    max21_deaths_Per100k = max21_deaths / population_InMonth * 100000,
+    max21_peopleVaccinated_Per100k = max21_peopleVaccinated / population_InMonth * 100000,
+    max20_tests_Per100k = max20_tests / population_InMonth * 100000,
+    max20_cases_Per100k = max20_cases / population_InMonth * 100000,
+    max20_deaths_Per100k = max20_deaths / population_InMonth * 100000,
+    max20_peopleVaccinated_Per100k = max20_peopleVaccinated / population_InMonth * 100000,
+  )
+
+
+
+
+# Variable matching
+setDT(YearsMax)
+YearsMax[, .()] |> head()
+data_2[order(location), .(location, Testing20, Testing21)] |> head()
+
+```
+
+## Session Info
+
+```{r}
+sessioninfo::session_info()
+```
