@@ -1,0 +1,4 @@
+aria2c https://covid.ourworldindata.org/data/owid-covid-data.csv
+
+MCV1 data: https://www.who.int/data/gho/data/indicators/indicator-details/GHO/measles-containing-vaccine-first-dose-(mcv1)-immunization-coverage-among-1-year-olds-(-)
+MCV2 data: https://www.who.int/data/gho/data/indicators/indicator-details/GHO/measles-containing-vaccine-second-dose-(mcv2)-immunization-coverage-by-the-nationally-recommended-age-(-)
