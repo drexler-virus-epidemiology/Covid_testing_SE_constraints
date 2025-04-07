@@ -43,11 +43,11 @@ project:
 # define alternative package directory
 r_on_cluster <- FALSE
 if (r_on_cluster == TRUE) {
-  bp <- "/data/gpfs-1/users/cabe12_c"
-  .libPaths("/fast/work/groups/ag-drexler/RPackageLibrary/4.1.3/")
+  bp <- ""
+  .libPaths("")
 } else {
   if (grepl(x = getwd(), pattern =  "carl")) {
-    bp <- "/home/carl/Dokumente/06_projects/"
+    bp <- ""
   }
 }
 
